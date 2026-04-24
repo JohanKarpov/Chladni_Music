@@ -406,8 +406,8 @@
   // Detect iOS (all browsers on iOS use WebKit — no getDisplayMedia audio)
   const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
                  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  // Also hide SYS toggle inside Telegram (getDisplayMedia not available in WebView)
-  if (IS_IOS || TG) document.getElementById('src-sw').style.display = 'none';
+  // Also hide SYS toggle inside Telegram on mobile (getDisplayMedia not available in mobile WebView)
+  if (IS_IOS || (TG && IS_MOBILE)) document.getElementById('src-sw').style.display = 'none';
 
   async function connectStream(stream) {
     capturedStream = stream;
