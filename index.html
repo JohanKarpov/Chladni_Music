@@ -1,0 +1,1082 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>Chladni Particles</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; font-family: sans-serif; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+
+    #ui {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      background: rgba(255,255,255,0.06);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255,255,255,0.11);
+      border-radius: 40px;
+      padding: 10px 24px;
+      z-index: 10;
+      flex-wrap: wrap;
+      justify-content: center;
+      max-width: 92vw;
+    }
+
+    #btn-toggle {
+      background: none;
+      border: 1.5px solid rgba(255,255,255,0.45);
+      color: #fff;
+      border-radius: 20px;
+      padding: 6px 18px;
+      cursor: pointer;
+      font-size: 13px;
+      letter-spacing: 0.05em;
+      transition: background 0.2s;
+      white-space: nowrap;
+    }
+    #btn-toggle:hover { background: rgba(255,255,255,0.09); }
+
+    label {
+      color: rgba(255,255,255,0.5);
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+
+    input[type=range] {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 96px;
+      height: 3px;
+      background: rgba(255,255,255,0.2);
+      border-radius: 2px;
+      outline: none;
+    }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 13px; height: 13px;
+      border-radius: 50%;
+      background: #fff;
+      cursor: pointer;
+    }
+
+    #info {
+      position: fixed;
+      top: 14px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(255,255,255,0.25);
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      pointer-events: none;
+      text-align: center;
+    }
+
+    /* ── Band meters (top-right) ── */
+    #bands {
+      position: fixed;
+      top: 14px;
+      right: 20px;
+      display: flex;
+      gap: 8px;
+      align-items: flex-end;
+      pointer-events: none;
+    }
+    .bw { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+    .bl { font-size: 8px; letter-spacing: 0.1em; color: rgba(255,255,255,0.22); }
+    .bm {
+      width: 3px; height: 36px;
+      background: rgba(255,255,255,0.07);
+      border-radius: 2px;
+      position: relative; overflow: hidden;
+    }
+    .bf {
+      position: absolute; bottom: 0; width: 100%;
+      background: rgba(255,255,255,0.55);
+      border-radius: 2px;
+    }
+
+    /* ── Source toggle switch (MIC / SYS) ── */
+    #src-sw {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      cursor: pointer;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .src-lbl {
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      color: rgba(255,255,255,0.35);
+      transition: color 0.2s;
+      min-width: 22px;
+    }
+    #lbl-mic { text-align: right; }
+    #lbl-sys { text-align: left; }
+    .src-lbl.active { color: #fff; }
+    #sw-track {
+      width: 34px; height: 18px;
+      background: rgba(255,255,255,0.15);
+      border-radius: 9px;
+      position: relative;
+      transition: background 0.25s;
+      flex-shrink: 0;
+    }
+    #sw-thumb {
+      position: absolute;
+      top: 2px; left: 2px;
+      width: 14px; height: 14px;
+      border-radius: 50%;
+      background: #fff;
+      transition: transform 0.25s;
+    }
+    #src-sw.sys #sw-thumb { transform: translateX(16px); }
+    #src-sw.sys #sw-track  { background: rgba(100,180,255,0.35); }
+
+    #btn-start {
+      background: none;
+      border: 1.5px solid rgba(255,255,255,0.45);
+      color: #fff;
+      border-radius: 20px;
+      padding: 6px 18px;
+      cursor: pointer;
+      font-size: 13px;
+      letter-spacing: 0.05em;
+      transition: background 0.2s;
+      white-space: nowrap;
+    }
+    #btn-start:hover  { background: rgba(255,255,255,0.09); }
+    #btn-start.active { border-color: rgba(255,120,120,0.7); color: rgba(255,140,140,1); }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div id="info">CHLADNI PARTICLES</div>
+
+  <!-- Band meters -->
+  <div id="bands">
+    <div class="bw">
+      <div class="bm"><div class="bf" id="bf-bass" style="height:0%"></div></div>
+      <div class="bl">BASS</div>
+    </div>
+    <div class="bw">
+      <div class="bm"><div class="bf" id="bf-mel" style="height:0%"></div></div>
+      <div class="bl">MEL</div>
+    </div>
+    <div class="bw">
+      <div class="bm"><div class="bf" id="bf-avg" style="height:0%"></div></div>
+      <div class="bl">AVG</div>
+    </div>
+  </div>
+
+  <div id="ui">
+    <!-- Source toggle: hidden on iOS because getDisplayMedia is unsupported -->
+    <div id="src-sw" title="Switch audio source">
+      <span class="src-lbl active" id="lbl-mic">MIC</span>
+      <div id="sw-track"><div id="sw-thumb"></div></div>
+      <span class="src-lbl" id="lbl-sys">SYS</span>
+    </div>
+
+    <button id="btn-start">START</button>
+
+    <label>SENSITIVITY
+      <input type="range" id="sens" min="0.5" max="5" step="0.1" value="2.0" />
+    </label>
+    <label>NOISE GATE
+      <input type="range" id="gate" min="0" max="0.15" step="0.005" value="0.03" />
+    </label>
+  </div>
+
+  <script>
+  // ═══════════════════════════════════════════════════════
+  //  CONFIG
+  // ═══════════════════════════════════════════════════════
+  // ── Performance tier: auto-scales particles + DPR on mobile ──────────────
+  const IS_MOBILE  = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
+                     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const PERF_TIER  = IS_MOBILE
+    ? (navigator.hardwareConcurrency >= 6 ? 1 : 0)   // 0=weak, 1=mid mobile
+    : 2;                                              // 2=desktop
+  const N_PARTICLES = [12000, 22000, 35000][PERF_TIER];
+  const ECHO_ON     = PERF_TIER >= 1;    // echo overlay off on weakest tier
+  const RENDER_DPR  = Math.min(window.devicePixelRatio || 1, IS_MOBILE ? 1.5 : 2.0);
+
+  const FFT_SIZE    = 2048;
+  const ATTRACT_K   = 0.010;
+  const DAMPING     = 0.970;
+  const MAX_SPEED   = 0.014;
+  const PLATE_SCALE = 0.70;
+  const AVG_FRAMES  = 20;
+
+  // Frequency band ranges (Hz)
+  const BASS_LO   = 20,   BASS_HI   = 250;
+  const MELODY_LO = 500,  MELODY_HI = 4000;
+  const AVG_LO    = 80,   AVG_HI    = 4000;
+
+  // ═══════════════════════════════════════════════════════
+  //  WEBGL SETUP
+  // ═══════════════════════════════════════════════════════
+  const canvas = document.getElementById('c');
+  const gl = canvas.getContext('webgl', { antialias: false, alpha: false });
+  if (!gl) { alert('WebGL not supported'); throw new Error('no webgl'); }
+
+  function resize() {
+    canvas.width  = window.innerWidth  * RENDER_DPR | 0;
+    canvas.height = window.innerHeight * RENDER_DPR | 0;
+    // viewport is set per-frame as a centred square
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  // Helper: compute square viewport (centred, min side)
+  function squareVP() {
+    const side = Math.min(canvas.width, canvas.height);
+    return { x: (canvas.width  - side) >> 1,
+             y: (canvas.height - side) >> 1,
+             s: side };
+  }
+
+  // ═══════════════════════════════════════════════════════
+  //  SHADERS
+  // ═══════════════════════════════════════════════════════
+  const VS = `
+    attribute vec2  a_pos;
+    attribute float a_life;
+    uniform float   u_ptSize;
+    uniform float   u_zoom;
+    varying float   v_life;
+    void main() {
+      gl_Position = vec4(a_pos * u_zoom, 0.0, 1.0);
+      gl_PointSize = u_ptSize;
+      v_life = a_life;
+    }
+  `;
+
+  // Monochrome: warm white/gold like real Chladni sand under warm light
+  const FS = `
+    precision mediump float;
+    uniform float u_melodyAmp;
+    uniform float u_bassAmp;
+    uniform float u_rms;
+    varying float v_life;
+
+    void main() {
+      vec2  uv = gl_PointCoord - 0.5;
+      float d  = dot(uv, uv);
+      if (d > 0.25) discard;
+
+      // Energy level: drives warmth and brightness
+      float energy = clamp(u_rms * 0.7 + u_melodyAmp * 0.2 + u_bassAmp * 0.15, 0.0, 1.0);
+      // Deep amber (quiet) → bright near-white (loud) — like sand lit by warm light
+      vec3 sand   = vec3(1.00, 0.80, 0.38);   // warm amber-gold
+      vec3 bright = vec3(1.00, 0.97, 0.88);   // near-white bloom
+      vec3 col    = mix(sand, bright, energy);
+
+      // Bass pulse adds a momentary golden-white flash
+      col = mix(col, vec3(1.0, 0.95, 0.70), u_bassAmp * 0.35);
+
+      float alpha = (1.0 - d * 4.0)
+                  * (0.42 + 0.30 * u_rms + 0.14 * u_melodyAmp + 0.18 * u_bassAmp)
+                  * v_life;
+      gl_FragColor = vec4(col * alpha, alpha);
+    }
+  `;
+
+  function compileShader(src, type) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+      throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  }
+
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compileShader(VS, gl.VERTEX_SHADER));
+  gl.attachShader(prog, compileShader(FS, gl.FRAGMENT_SHADER));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
+    throw new Error(gl.getProgramInfoLog(prog));
+
+  gl.useProgram(prog);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE); // additive → glow
+
+  const loc = {
+    pos:       gl.getAttribLocation(prog,  'a_pos'),
+    life:      gl.getAttribLocation(prog,  'a_life'),
+    ptSize:    gl.getUniformLocation(prog, 'u_ptSize'),
+    zoom:      gl.getUniformLocation(prog, 'u_zoom'),
+    melodyAmp: gl.getUniformLocation(prog, 'u_melodyAmp'),
+    bassAmp:   gl.getUniformLocation(prog, 'u_bassAmp'),
+    rms:       gl.getUniformLocation(prog, 'u_rms'),
+  };
+
+  // ═══════════════════════════════════════════════════════
+  //  BUFFERS
+  // ═══════════════════════════════════════════════════════
+  const positions = new Float32Array(N_PARTICLES * 2);
+  const lifes     = new Float32Array(N_PARTICLES);
+  const velX      = new Float32Array(N_PARTICLES);
+  const velY      = new Float32Array(N_PARTICLES);
+
+  for (let i = 0; i < N_PARTICLES; i++) {
+    positions[i*2]     = Math.random() * 2 - 1;
+    positions[i*2 + 1] = Math.random() * 2 - 1;
+    lifes[i] = Math.random();
+  }
+
+  const bufPos = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufPos);
+  gl.bufferData(gl.ARRAY_BUFFER, positions, gl.DYNAMIC_DRAW);
+  gl.enableVertexAttribArray(loc.pos);
+  gl.vertexAttribPointer(loc.pos, 2, gl.FLOAT, false, 0, 0);
+
+  const bufLife = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufLife);
+  gl.bufferData(gl.ARRAY_BUFFER, lifes, gl.DYNAMIC_DRAW);
+  gl.enableVertexAttribArray(loc.life);
+  gl.vertexAttribPointer(loc.life, 1, gl.FLOAT, false, 0, 0);
+
+  // ═══════════════════════════════════════════════════════
+  //  AUDIO
+  // ═══════════════════════════════════════════════════════
+  let audioCtx  = null, analyser = null, dataArray = null, prevData = null;
+  let audioActive = false;   // true when any source is running
+  let capturedStream = null; // keep ref to stop tracks on teardown
+
+  // Detect iOS (all browsers on iOS use WebKit — no getDisplayMedia audio)
+  const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+                 (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  if (IS_IOS) document.getElementById('src-sw').style.display = 'none';
+
+  async function connectStream(stream) {
+    capturedStream = stream;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = FFT_SIZE;
+    analyser.smoothingTimeConstant = 0.75;
+    src.connect(analyser);
+    dataArray = new Uint8Array(analyser.frequencyBinCount);
+    prevData  = new Uint8Array(analyser.frequencyBinCount);
+    persScore = new Float32Array(analyser.frequencyBinCount);
+    audioActive = true;
+  }
+
+  async function startMic() {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    await connectStream(stream);
+  }
+
+  async function startSystem() {
+    let stream;
+    try {
+      // Chrome 105+ accepts video:false for audio-only tab capture
+      stream = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: false });
+    } catch (_) {
+      // Fallback: request minimal video, stop it immediately
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        audio: true,
+        video: { width: 1, height: 1 }
+      });
+    }
+    stream.getVideoTracks().forEach(t => t.stop());
+    await connectStream(stream);
+  }
+
+  function stopAudio() {
+    if (capturedStream) {
+      capturedStream.getTracks().forEach(t => t.stop());
+      capturedStream = null;
+    }
+    if (audioCtx) { audioCtx.close(); audioCtx = null; }
+    analyser = null; dataArray = null; prevData = null; persScore = null;
+    audioActive = false;
+    // idleWeight will naturally lerp to 1 now that audioActive=false
+  }
+
+  // ─── Three-band analysis + noise gate + persistence tracker ─────────────────
+  const freqHistory = [];
+  // Persistence scores: how long each bin has been in the top-3 of 300-3500 Hz.
+  // Bins that hold a note for >0.5s rise to the top → captures melody/vocals
+  // even when louder short-lived transients share the same range.
+  let persScore  = null;  // Float32Array, allocated on first audio connect
+  let persFreq   = 500;   // Hz — current persistent melodic frequency
+  let persSmooth = 0.5;   // 0..1 normalised (log-scale 300-3500 Hz)
+
+  // Auto-gain: running maximum per channel with slow decay.
+  // Adapts to the loudness of each track so meters never clip, sens still fine-tunes.
+  let autoMaxBass = 0.10, autoMaxMel = 0.10, autoMaxRms = 0.05, autoMaxAvg = 0.10;
+
+  function analyzeBands() {
+    if (!analyser || !dataArray) return null;
+    analyser.getByteFrequencyData(dataArray);
+
+    const binHz   = audioCtx.sampleRate / FFT_SIZE;
+    const sens    = parseFloat(document.getElementById('sens').value);
+    const gateVal = parseFloat(document.getElementById('gate').value);
+    const bins    = dataArray.length;
+
+    // Noise gate: global RMS — cuts ambient noise below threshold
+    let rmsSum = 0;
+    for (let i = 0; i < bins; i++) rmsSum += dataArray[i] * dataArray[i];
+    const rms = Math.sqrt(rmsSum / bins) / 255;
+    if (rms < gateVal) {
+      if (prevData) prevData.set(dataArray);
+      return { bassAmp: 0, melodyAmp: 0, melodyFreq: MELODY_LO, avgFreq: 220, avgAmp: 0,
+               rms: 0, centroidNorm: 0.3, spreadNorm: 0.3, flux: 0, persistFreq: persFreq };
+    }
+
+    // ── SUB BASS  20–80 Hz (kick/sub) ──────────────────────────────────────────
+    const subLo = Math.max(1, Math.floor(20 / binHz));
+    const subHi = Math.min(Math.floor(80 / binHz), bins - 1);
+    let subSum = 0;
+    for (let i = subLo; i <= subHi; i++) subSum += dataArray[i];
+    const subAmp = Math.min((subSum / ((subHi - subLo + 1) * 255)) * sens * 3.5, 1.0);
+
+    // ── BASS  80–300 Hz: mean energy ─────────────────────────────────────────
+    const bassLo = Math.max(1, Math.floor(80 / binHz));
+    const bassHi = Math.min(Math.floor(300 / binHz), bins - 1);
+    let bassSum = 0;
+    for (let i = bassLo; i <= bassHi; i++) bassSum += dataArray[i];
+    const bassRaw = bassSum / ((bassHi - bassLo + 1) * 255);
+    autoMaxBass    = Math.max(0.08, Math.max(autoMaxBass * 0.9994, bassRaw));
+    const bassAmp  = Math.min(1, bassRaw / autoMaxBass * 0.85 * (sens / 2));
+
+    // ── PRESENCE  300–3500 Hz: persistent frequency tracker ─────────────────
+    // Uses per-bin exponential score: bins that stay loud accumulate score.
+    // The highest-scoring bin = melodic/vocal note most prominent to the ear.
+    const presLo = Math.floor(300 / binHz);
+    const presHi = Math.min(Math.floor(3500 / binHz), bins - 1);
+    // Identify top-3 bins this frame
+    let top3 = [presLo, presLo, presLo];
+    for (let i = presLo; i <= presHi; i++) {
+      if (dataArray[i] > dataArray[top3[2]]) {
+        top3[2] = i;
+        if (dataArray[top3[2]] > dataArray[top3[1]]) { [top3[1],top3[2]] = [top3[2],top3[1]]; }
+        if (dataArray[top3[1]] > dataArray[top3[0]]) { [top3[0],top3[1]] = [top3[1],top3[0]]; }
+      }
+    }
+    const top3set = new Set(top3);
+    if (persScore) {
+      for (let i = presLo; i <= presHi; i++) {
+        if (top3set.has(i)) persScore[i] = persScore[i] * 0.92 + 0.08;
+        else                persScore[i] *= 0.92;
+      }
+      let bestBin = presLo, bestScore = 0;
+      for (let i = presLo; i <= presHi; i++) {
+        if (persScore[i] > bestScore) { bestScore = persScore[i]; bestBin = i; }
+      }
+      persFreq = bestBin * binHz;
+    }
+    const persistFreq = persFreq;
+
+    // ── MELODY  500–4000 Hz: dominant frequency + amplitude ──────────────────
+    const melLo = Math.floor(MELODY_LO / binHz);
+    const melHi = Math.min(Math.floor(MELODY_HI / binHz), bins - 1);
+    let melMax = 0, melBin = melLo;
+    for (let i = melLo; i <= melHi; i++) {
+      if (dataArray[i] > melMax) { melMax = dataArray[i]; melBin = i; }
+    }
+    const melodyFreq = melBin * binHz;
+    const melRaw     = melMax / 255;
+    autoMaxMel       = Math.max(0.08, Math.max(autoMaxMel * 0.9994, melRaw));
+    const melodyAmp  = Math.min(1, melRaw / autoMaxMel * 0.85 * (sens / 2));
+
+    // ── AVG DOMINANT  80–4000 Hz: rolling ~50 ms ──────────────────────────────
+    const avgLo = Math.floor(AVG_LO / binHz);
+    const avgHi = Math.min(Math.floor(AVG_HI / binHz), bins - 1);
+    let avgMax = 0, avgBin = avgLo;
+    for (let i = avgLo; i <= avgHi; i++) {
+      if (dataArray[i] > avgMax) { avgMax = dataArray[i]; avgBin = i; }
+    }
+    freqHistory.push(avgBin * binHz);
+    if (freqHistory.length > AVG_FRAMES) freqHistory.shift();
+    const avgFreq = freqHistory.reduce((a, b) => a + b, 0) / freqHistory.length;
+    const avgRaw  = avgMax / 255;
+    autoMaxAvg    = Math.max(0.08, Math.max(autoMaxAvg * 0.9994, avgRaw));
+    const avgAmp  = Math.min(1, avgRaw / autoMaxAvg * 0.85 * (sens / 2));
+
+    // ── SPECTRAL CENTROID (80–8000 Hz): weighted mean frequency ─────────────
+    const cLo = Math.max(1, Math.floor(80 / binHz));
+    const cHi = Math.min(Math.floor(8000 / binHz), bins - 1);
+    let centNum = 0, centDen = 0;
+    for (let i = cLo; i <= cHi; i++) { centNum += (i * binHz) * dataArray[i]; centDen += dataArray[i]; }
+    const centroid     = centDen > 0 ? centNum / centDen : 500;
+    const centroidNorm = Math.max(0, Math.min(1,
+      Math.log2(Math.max(centroid, 80) / 80) / Math.log2(8000 / 80)));
+
+    // ── SPECTRAL SPREAD: std-dev around centroid → "width" of timbre ─────────
+    let spreadNum = 0;
+    for (let i = cLo; i <= cHi; i++) {
+      const df = i * binHz - centroid;
+      spreadNum += df * df * dataArray[i];
+    }
+    const spreadNorm = Math.min(1, (centDen > 0 ? Math.sqrt(spreadNum / centDen) : 0) / 2500);
+
+    // ── SPECTRAL FLUX: positive spectral change → attack / transient ─────────
+    let fluxSum = 0;
+    if (prevData) {
+      for (let i = cLo; i <= cHi; i++) fluxSum += Math.max(0, dataArray[i] - prevData[i]);
+    }
+    const flux = Math.min(1, (fluxSum / (cHi - cLo + 1) / 255) * sens * 10);
+    if (prevData) prevData.set(dataArray);
+
+    autoMaxRms    = Math.max(0.05, Math.max(autoMaxRms * 0.9994, rms));
+    const rmsNorm = Math.min(1, rms / autoMaxRms * 0.85 * (sens / 2));
+
+    return { bassAmp, melodyAmp, melodyFreq, avgFreq, avgAmp,
+             rms: rmsNorm, centroidNorm, spreadNorm, flux, persistFreq, subAmp };
+  }
+
+  // ═══════════════════════════════════════════════════════
+  //  CHLADNI MATH
+  // ═══════════════════════════════════════════════════════
+
+  // Flat mode table: index 0=simple/low → 19=complex/high.
+  // Pitch-correlated: persistent melodic pitch maps index here.
+  // On pitch change the index shifts ±1..2 (no random jumps).
+  const ALL_MODES = [
+    [1,2],[1,3],[2,3],[2,5],[1,4],   // 0-4:  simple, open petals
+    [3,4],[1,5],[3,5],[2,7],[1,6],   // 5-9:  medium rosettes
+    [4,5],[3,7],[4,7],[2,9],[1,7],   // 10-14: complex flowers
+    [5,7],[3,8],[4,9],[5,9],[3,10],  // 15-19: dense / intricate
+  ];
+  const ALL_SEC_MODES = [
+    [1,3],[2,3],[1,4],[3,4],[2,5],
+    [3,5],[2,7],[4,5],[3,7],[1,6],
+    [4,7],[5,7],[3,8],[2,9],[5,8],
+    [4,9],[5,9],[3,10],[6,7],[4,11],
+  ];
+
+  function freqToMN(freq, modes, loHz, hiHz) {
+    // kept for potential future use, but mode selection is now timer-based
+    const t   = Math.log2(Math.max(freq, loHz) / loHz) / Math.log2(hiHz / loHz);
+    const tc  = Math.max(0, Math.min(1, t));
+    const idx = Math.min(Math.floor(tc * modes.length), modes.length - 1);
+    return { m: modes[idx][0], n: modes[idx][1] };
+  }
+
+  // Classic Chladni free-plate formula: cos(mπx)·cos(nπy) + cos(nπx)·cos(mπy).
+  // m, n must be integers. Returns field value f and gradient (fx, fy).
+  function chladniFG(x, y, m, n) {
+    const mpx = m * Math.PI * x,  npx = n * Math.PI * x;
+    const mpy = m * Math.PI * y,  npy = n * Math.PI * y;
+    const smx = Math.sin(mpx), cmx = Math.cos(mpx);
+    const snx = Math.sin(npx), cnx = Math.cos(npx);
+    const smy = Math.sin(mpy), cmy = Math.cos(mpy);
+    const sny = Math.sin(npy), cny = Math.cos(npy);
+    return {
+      f:  cmx * cny + cnx * cmy,
+      fx: -m * Math.PI * smx * cny - n * Math.PI * snx * cmy,
+      fy: -n * Math.PI * cmx * sny - m * Math.PI * cnx * smy,
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════
+  //  SMOOTHED STATE
+  // ═══════════════════════════════════════════════════════
+  let smoothBassAmp  = 0;
+  let bassInstant    = 0;   // fast EMA for kick transient detection
+  let bassSlowSmooth = 0;   // slow EMA baseline
+
+  let smoothMelodyAmp = 0;
+  let smoothAvgAmp    = 0;
+
+  // Continuous pitch tracking
+  let smoothPersNorm  = 0.25;  // 0..1 log-scale 300-3500 Hz, current smoothed pitch
+  let prevPersNorm    = 0.25;  // previous frame value — used to compute pitch velocity
+
+  // Active radius state
+  let activeRadius = 0.25;
+  // audioWarmup: 0 when audio just started, approaches 1 over ~5s of continuous signal.
+  // Used to gate the centripetal boundary so particles form a compact figure first
+  // before being allowed to expand toward the full activeRadius.
+  let audioWarmup  = 0.0;
+
+  // Spectral features
+  let smoothRMS      = 0;
+  let smoothCentroid = 0.3;
+  let smoothSpread   = 0.3;
+  let smoothFlux     = 0;
+
+  // smoothM/N: float m,n values fed directly into chladniFG.
+  // They continuously lerp toward the target derived from pitchNorm.
+  // Non-integer values produce smooth in-between Chladni patterns.
+  let smoothM  = 2.0, smoothN  = 3.0;  // main figure
+  let smoothMM = 3.0, smoothMN = 5.0;  // echo overlay (slightly more complex)
+
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  // Interpolate m,n between adjacent table entries at float index fi
+  function modeAtFloat(table, fi) {
+    const i0 = Math.max(0, Math.min(table.length - 2, Math.floor(fi)));
+    const t  = fi - i0;
+    return [ table[i0][0] + (table[i0+1][0] - table[i0][0]) * t,
+             table[i0][1] + (table[i0+1][1] - table[i0][1]) * t ];
+  }
+
+  // ─── Idle state ──────────────────────────────────────────────────────────────
+  const IDLE_JITTER = 0.0008;   // tiny Brownian drift during idle
+  // 0 = fully active (Chladni), 1 = fully idle (drift).
+  // Starts at 1 so particles are in drift mode before any audio.
+  let idleWeight = 1.0;
+
+  // ─── Cursor / touch repulsion ─────────────────────────────────────────────────
+  // All values in clip-space (-1..1).  R² comparison avoids sqrt.
+  const REPULSE_R  = 0.22;       // influence radius
+  const REPULSE_R2 = REPULSE_R * REPULSE_R;
+  const REPULSE_K  = 0.010;      // base force scale (boosted dynamically by activeK)
+  let cursorX = 0, cursorY = 0, cursorActive = false;
+
+  function updateCursor(cx, cy) {
+    // Map screen coords into the square simulation area (clip-space -1..1)
+    const side   = Math.min(window.innerWidth, window.innerHeight);
+    const offX   = (window.innerWidth  - side) / 2;
+    const offY   = (window.innerHeight - side) / 2;
+    cursorX =  ((cx - offX) / side) * 2 - 1;
+    cursorY = -(((cy - offY) / side) * 2 - 1);
+    cursorActive = true;
+  }
+  canvas.addEventListener('mousemove', e => updateCursor(e.clientX, e.clientY));
+  canvas.addEventListener('mouseleave', () => { cursorActive = false; });
+  canvas.addEventListener('touchmove', e => {
+    e.preventDefault();
+    updateCursor(e.touches[0].clientX, e.touches[0].clientY);
+  }, { passive: false });
+  canvas.addEventListener('touchend',   () => { cursorActive = false; });
+  canvas.addEventListener('touchcancel',() => { cursorActive = false; });
+
+  // ─── Cached DOM refs (avoid querySelector in hot path) ───────────────────────
+  const elBass = document.getElementById('bf-bass');
+  const elMel  = document.getElementById('bf-mel');
+  const elAvg  = document.getElementById('bf-avg');
+
+  // ═══════════════════════════════════════════════════════
+  //  RENDER LOOP
+  // ═══════════════════════════════════════════════════════
+  // Visual zoom: maps particle positions (clustered near activeRadius) to ~65% of screen
+  let smoothZoom = 1.5;
+
+  let lastTime = 0;
+
+  function frame(ts) {
+    requestAnimationFrame(frame);
+    const dt = Math.min((ts - lastTime) / 1000, 0.05);
+    lastTime = ts;
+
+    // ── 1. Audio ──────────────────────────────────────────────────────────────
+    let rawBass = 0, rawMelody = 0, melFreq = MELODY_LO, avgFreq = 220, rawAvg = 0;
+    let rawRMS = 0, rawCentroid = 0.3, rawSpread = 0.3, rawFlux = 0;
+    let rawPersistFreq = persFreq;
+    if (audioActive) {
+      const r = analyzeBands();
+      if (r) {
+        rawBass          = r.bassAmp;
+        rawMelody        = r.melodyAmp;
+        melFreq          = r.melodyFreq;
+        avgFreq          = r.avgFreq;
+        rawAvg           = r.avgAmp;
+        rawRMS           = r.rms;
+        rawCentroid      = r.centroidNorm;
+        rawSpread        = r.spreadNorm;
+        rawFlux          = r.flux;
+        rawPersistFreq   = r.persistFreq;
+      }
+    }
+
+    // ── Genre fingerprint (computed from autoMax long-term channel levels) ────
+    // autoMaxBass/Mel encode ~20s running max of each channel, so their ratio
+    // captures whether this track is bass-heavy vs acoustic/bright.
+    //   bassRatioBM > 0.55 → bass-heavy (EDM, hip-hop, trap)
+    //   bassRatioBM < 0.38 → bright/acoustic (classical, flute, voice solo)
+    //   otherwise          → balanced (pop, rock, jazz)
+    const bassRatioBM = autoMaxBass / (autoMaxBass + autoMaxMel + 1e-6);
+
+    // ── 2. Smooth idle weight ─────────────────────────────────────────────────
+    // hasSignal threshold adapts: acoustic tracks are quieter overall, so lower
+    // the bar for them. Bass-heavy tracks have strong bass signal → normal bar.
+    if (!audioActive) {
+      idleWeight = lerp(idleWeight, 1.0, 0.05);
+    } else {
+      const sigThresh = 0.007 + bassRatioBM * 0.013;  // 0.007 (acoustic) .. 0.020 (EDM)
+      const hasSignal = rawAvg > sigThresh || rawBass > sigThresh;
+      idleWeight = lerp(idleWeight, hasSignal ? 0.0 : 1.0, 0.016);
+    }
+    const activeK = 1.0 - idleWeight;  // 0..1 — scales Chladni forces
+
+    // ── 3. Smooth / detect transients ────────────────────────────────────────
+
+    // Bass: fast + slow EMA → kick = sharp positive spike only
+    bassInstant    = lerp(bassInstant,    rawBass, 0.55);
+    bassSlowSmooth = lerp(bassSlowSmooth, rawBass, 0.04);
+    const kickRaw  = Math.max(0, bassInstant - bassSlowSmooth);
+    // Kick threshold adapts to genre: bass-heavy tracks have constant strong bass,
+    // so raise the threshold to avoid triggering on every beat. Acoustic tracks
+    // rarely have bass at all, so any bass event is significant → lower threshold.
+    // bassKick = full kickRaw value (not a difference) — only the gate adapts.
+    const kickThresh = 0.040 + bassRatioBM * 0.070;  // 0.040 (acoustic) .. 0.110 (EDM)
+    const bassKick   = kickRaw > kickThresh ? kickRaw : 0;
+    smoothBassAmp  = lerp(smoothBassAmp, rawBass, 0.10);
+
+    smoothMelodyAmp = lerp(smoothMelodyAmp, rawMelody, 0.07);
+    smoothAvgAmp    = lerp(smoothAvgAmp,    rawAvg,    0.08);
+    smoothRMS       = lerp(smoothRMS,       rawRMS,      0.10);
+    smoothCentroid  = lerp(smoothCentroid,  rawCentroid, 0.05);
+    smoothSpread    = lerp(smoothSpread,    rawSpread,   0.07);
+    smoothFlux      = lerp(smoothFlux,      rawFlux,     0.40);
+
+    // ── Active radius: spread sets shape, RMS gates overall size ─────────────
+    // rmsGateMult adapts to genre: acoustic/bright tracks have strong harmonics
+    // but weak RMS → raise sensitivity so figures form without needing loud signal.
+    // radiusCap: bass-absent tracks (guitar/voice) are capped at a smaller radius
+    // so particles don't escape to the outermost Chladni ring and form an octagon.
+    const rmsGateMult  = 5.0 + (1.0 - bassRatioBM) * 5.0;  // 5 (EDM) .. 10 (acoustic)
+    const rmsGate      = Math.min(1.0, smoothRMS * rmsGateMult);
+    const radiusCap    = 0.22 + bassRatioBM * 0.08;  // 0.22 (no bass) .. 0.30 (full EDM)
+    const targetRadius = Math.min(radiusCap, 0.16 + smoothSpread * rmsGate * 0.12);
+    activeRadius = lerp(activeRadius, targetRadius, 0.010);
+
+    // audioWarmup rises when audio is active, resets quickly when audio stops.
+    // Starts at 0 so figure forms compact before expanding to full activeRadius.
+    audioWarmup = lerp(audioWarmup, activeK > 0.15 ? 1.0 : 0.0,
+                       activeK > 0.15 ? 0.004 : 0.05);
+    // warmupBoundary: holds particles inside a small region while figure settles,
+    // then gradually unlocks the full activeRadius over ~5 seconds.
+    const warmupBoundary = lerp(0.15, activeRadius, audioWarmup);
+
+    // ── Continuous pitch → Chladni figure ────────────────────────────────────
+    // 1. Map persistent pitch (300-3500 Hz, log) → 0..1
+    const rawPN = Math.max(0, Math.min(1,
+      Math.log2(Math.max(rawPersistFreq, 300) / 300) / Math.log2(3500 / 300)));
+    // 2. Smooth the pitch signal. Faster when pitch moves quickly (responsive),
+    //    slower when stable (figure settles calmly, like sand finding its place).
+    const pitchVelocity = Math.abs(rawPN - smoothPersNorm);
+    const pitchSmooth   = Math.min(0.12, 0.025 + pitchVelocity * 1.5);
+    smoothPersNorm = lerp(smoothPersNorm, rawPN, pitchSmooth);
+
+    // 3. Float index into mode table (0..18.99)
+    const floatIdx  = smoothPersNorm * (ALL_MODES.length - 1);
+    const floatIdxS = Math.min(floatIdx + 2.5, ALL_SEC_MODES.length - 1);
+
+    // 4. Interpolate target [m, n] from adjacent table entries
+    const [tM,  tN ] = modeAtFloat(ALL_MODES,     floatIdx);
+    const [tMM, tMN] = modeAtFloat(ALL_SEC_MODES, floatIdxS);
+
+    // 5. Lerp smoothM/N toward targets. Rate scales with how fast pitch is moving:
+    //    slow drift → 0.018 (~1.5s to settle); fast jump → up to 0.055 (~0.5s).
+    const figLerp = Math.min(0.055, 0.018 + pitchVelocity * 3.0);
+    smoothM  = lerp(smoothM,  tM,  figLerp);
+    smoothN  = lerp(smoothN,  tN,  figLerp);
+    smoothMM = lerp(smoothMM, tMM, figLerp);
+    smoothMN = lerp(smoothMN, tMN, figLerp);
+    prevPersNorm = smoothPersNorm;
+
+    // ── 4. Particle update ────────────────────────────────────────────────────
+    // Chladni forces scaled by activeK (0 in idle, 1 fully active)
+    const mainAttr  = ATTRACT_K * activeK;
+    const secAttr   = ATTRACT_K * 0.12 * activeK;  // echo overlay — subtle, always-on
+    // Bass kick: strength scales with genre — EDM gets strong plate shake,
+    // acoustic gets subtle reaction. kickStr range: ~0.052 (acoustic) .. ~0.100 (EDM).
+    const kickStr   = bassKick * (0.040 + bassRatioBM * 0.060) * activeK;
+    const hasSecond = ECHO_ON && activeK > 0.05;
+
+    for (let i = 0; i < N_PARTICLES; i++) {
+      let x = positions[i*2];
+      let y = positions[i*2 + 1];
+
+      // ── Soft clamp: push back from edges + hard clamp with local var update ──
+      const EDGE = 0.88;
+      if (x >  EDGE) velX[i] -= (x - EDGE) * 0.018;
+      if (x < -EDGE) velX[i] -= (x + EDGE) * 0.018;
+      if (y >  EDGE) velY[i] -= (y - EDGE) * 0.018;
+      if (y < -EDGE) velY[i] -= (y + EDGE) * 0.018;
+      // Hard clamp: update local x/y so the final position write uses clamped value
+      if (x >  1.05) { x =  1.05; velX[i] *= -0.3; }
+      if (x < -1.05) { x = -1.05; velX[i] *= -0.3; }
+      if (y >  1.05) { y =  1.05; velY[i] *= -0.3; }
+      if (y < -1.05) { y = -1.05; velY[i] *= -0.3; }
+
+      // ── Centripetal force: plate boundary — beyond warmupBoundary pull back ─────
+      // warmupBoundary starts small (0.30) when audio begins, then expands to
+      // activeRadius over ~5s. This prevents particles from escaping to the outer
+      // Chladni ring before the figure has formed.
+      const r2p = x*x + y*y;
+      const rp  = Math.sqrt(r2p) + 1e-6;
+      if (rp > warmupBoundary) {
+        const pull = (rp - warmupBoundary) * 0.035 * Math.max(0.35, activeK);
+        velX[i] -= (x / rp) * pull;
+        velY[i] -= (y / rp) * pull;
+      }
+
+      // ── Center mask: suppress Chladni near origin ────────────────────────────
+      // At (0,0) the formula value is +2 (maximum), gradient is ~0 by symmetry.
+      // Without masking, particles drift outward to the first nodal ring.
+      // With masking, the center "dead zone" keeps particles that wander there.
+      // centreMask: suppress Chladni pull inside the ring zone so particles
+      // can rest there. Fades from 0 at origin to 1 at the ring edge (0.15).
+      const centreMask = Math.min(1.0, rp / 0.15);
+
+      // dynPS: zoom the Chladni formula so particles always see nodal structure
+      // even when activeRadius is tiny. Without this, at r<0.20 all modes look
+      // like a circle because cos(mπ*0.1)≈1 everywhere.
+      // Target eval radius at boundary: ~0.42. Capped at PLATE_SCALE*2.
+      const dynPS = Math.min(PLATE_SCALE * 2.0, 0.42 / Math.max(activeRadius, 0.14));
+
+      let absSecF = 0;
+      let mainF   = 0;
+
+      // ── Chladni attraction + tangential sliding ──────────────────────────
+      const { f, fx, fy } = chladniFG(x * dynPS, y * dynPS, smoothM, smoothN);
+      // gradient is in formula-space; scale back to clip-space
+      const fxC = fx * dynPS, fyC = fy * dynPS;
+      mainF = f;
+      const gLen = Math.sqrt(fxC*fxC + fyC*fyC) + 1e-6;
+      // Gradient unit vector (normal to line) + tangent (along line)
+      const nx = fxC / gLen,  ny = fyC / gLen;
+      const tx = -ny,        ty =  nx;
+
+      // 1. Pull toward nodal line (spring-like: stronger when further)
+      // centreMask reduces this force near origin so particles can settle there.
+      velX[i] += nx * (-Math.tanh(f * 4.0) * mainAttr * centreMask);
+      velY[i] += ny * (-Math.tanh(f * 4.0) * mainAttr * centreMask);
+
+      if (activeK > 0.05) {
+        // Proximity weight: 1.0 on the line, 0 at |f|=0.30
+        const onLine = Math.max(0, 1.0 - Math.abs(f) / 0.30);
+        if (onLine > 0) {
+          // 2. Damp normal velocity — gated by current speed so fast particles
+          //    can fly through a nodal line on inertia and settle on the next one.
+          //    speedFactor=1 at MAX_SPEED, 0 at rest. High speed → weak damping.
+          const vn         = velX[i] * nx + velY[i] * ny;
+          const spd        = Math.sqrt(velX[i]*velX[i] + velY[i]*velY[i]);
+          const speedFactor = Math.min(1.0, spd / MAX_SPEED);
+          const normalDamp  = 0.55 * onLine * (1.0 - speedFactor * 0.75);
+          velX[i] -= vn * nx * normalDamp;
+          velY[i] -= vn * ny * normalDamp;
+          // 3. Tangential jitter — distributes particles along the full line
+          const jt = 0.028 * onLine * activeK;
+          velX[i] += tx * (Math.random() - 0.5) * jt;
+          velY[i] += ty * (Math.random() - 0.5) * jt;
+          // 4. Width jitter — line thickness scales with spectral spread
+          const jn = (0.004 + smoothSpread * 0.016) * onLine * activeK;
+          velX[i] += nx * (Math.random() - 0.5) * jn;
+          velY[i] += ny * (Math.random() - 0.5) * jn;
+          // 5. Line-hop: rare random kick perpendicular to line,
+          //    like a grain of sand bouncing to an adjacent nodal line.
+          //    Probability ~0.3% per particle per frame when on a line.
+          if (Math.random() < 0.003 * activeK) {
+            const hopStr = (0.006 + smoothRMS * 0.010) * (Math.random() < 0.5 ? 1 : -1);
+            velX[i] += nx * hopStr;
+            velY[i] += ny * hopStr;
+          }
+        }
+      }
+
+      // ── Center ring attractor ─────────────────────────────────────────────
+      // Ring scales with warmupBoundary so it stays proportional to the active zone
+      // and doesn't become a giant feature when the radius is small.
+      const RING_R     = warmupBoundary * 0.40;  // 40% of active radius
+      const RING_OUTER = warmupBoundary * 1.50;  // 150% — gentle outer pull
+      if (rp > 1e-6 && rp < RING_OUTER) {
+        const ringStr = 0.004 * Math.max(0.08, activeK);
+        let   radialF;
+        if (rp < RING_R) {
+          radialF = +ringStr * (rp / RING_R);
+        } else {
+          radialF = -ringStr * (1.0 - (rp - RING_R) / (RING_OUTER - RING_R));
+        }
+        velX[i] += (x / rp) * radialF;
+        velY[i] += (y / rp) * radialF;
+      }
+
+      if (hasSecond) {
+        const sec    = chladniFG(x * PLATE_SCALE, y * PLATE_SCALE, smoothMM, smoothMN);
+        const secFxC = sec.fx * PLATE_SCALE, secFyC = sec.fy * PLATE_SCALE;
+        const sgLen  = Math.sqrt(secFxC*secFxC + secFyC*secFyC) + 1e-6;
+        velX[i] += secFxC * (-sec.f / sgLen * secAttr);
+        velY[i] += secFyC * (-sec.f / sgLen * secAttr);
+        absSecF = Math.abs(sec.f);
+      } else {
+        absSecF = Math.abs(f);
+      }
+
+      // ── Bass: kick transient shake ──────────────────────────────────────────────
+      if (kickStr > 0) {
+        // Radial burst — shake the whole plate outward
+        velX[i] += (x / rp) * kickStr * 1.6 + (Math.random() - 0.5) * kickStr * 0.6;
+        velY[i] += (y / rp) * kickStr * 1.6 + (Math.random() - 0.5) * kickStr * 0.6;
+        // Strong kick also forces a line-hop: all particles on a line get knocked off.
+        // Probability scales with kick strength: soft kick ~15%, hard kick ~70%.
+        const hopChance = Math.min(0.70, kickStr * 8.0);
+        if (Math.random() < hopChance) {
+          const hopStr = kickStr * 1.2 * (Math.random() < 0.5 ? 1 : -1);
+          velX[i] += nx * hopStr;
+          velY[i] += ny * hopStr;
+        }
+      }
+      // ── Bass: continuous jitter (sustained bass level keeps particles alive) ─
+      if (smoothBassAmp > 0.025 && activeK > 0.05) {
+        const bassJ = smoothBassAmp * 0.012 * activeK;
+        velX[i] += (Math.random() - 0.5) * bassJ;
+        velY[i] += (Math.random() - 0.5) * bassJ;
+      }
+      // ── Spectral Flux: shake on attacks and filter sweeps ────────────────────
+      if (smoothFlux > 0.03 && activeK > 0.05) {
+        const fluxJ = smoothFlux * 0.020 * activeK;
+        velX[i] += (Math.random() - 0.5) * fluxJ;
+        velY[i] += (Math.random() - 0.5) * fluxJ;
+      }
+
+      // ── Idle drift: Brownian + gentle centre pull (scaled by idleWeight) ──
+      if (idleWeight > 0.01) {
+        velX[i] += (Math.random() - 0.5) * IDLE_JITTER * idleWeight;
+        velY[i] += (Math.random() - 0.5) * IDLE_JITTER * idleWeight;
+        velX[i] -= x * 0.0010 * idleWeight;  // stronger centre pull during silence
+        velY[i] -= y * 0.0010 * idleWeight;
+      }
+
+      // Baseline Brownian — light noise so particles don’t freeze entirely
+      velX[i] += (Math.random() - 0.5) * 0.0006;
+      velY[i] += (Math.random() - 0.5) * 0.0006;
+
+      velX[i] *= DAMPING;
+      velY[i] *= DAMPING;
+
+      // ── Velocity cap: sand grains can't move faster than MAX_SPEED ──────────
+      const spd2 = velX[i]*velX[i] + velY[i]*velY[i];
+      if (spd2 > MAX_SPEED * MAX_SPEED) {
+        const inv = MAX_SPEED / Math.sqrt(spd2);
+        velX[i] *= inv;
+        velY[i] *= inv;
+      }
+
+      // ── Cursor / touch repulsion — applied AFTER velocity cap ──────────────
+      // Dynamic strength: scales with activeK so the cursor always wins against
+      // the Chladni nodal pull locally, even during loud music with strong figures.
+      if (cursorActive) {
+        const dx = x - cursorX;
+        const dy = y - cursorY;
+        const d2 = dx*dx + dy*dy;
+        if (d2 < REPULSE_R2 && d2 > 1e-6) {
+          const repK  = REPULSE_K * (1.0 + activeK * 4.0);
+          const scale = (REPULSE_R2 - d2) / REPULSE_R2 * repK;
+          velX[i] += dx * scale;
+          velY[i] += dy * scale;
+        }
+      }
+
+      positions[i*2]     = x + velX[i];
+      positions[i*2 + 1] = y + velY[i];
+
+      // life: alpha encodes activeRadius falloff (dim beyond active zone) + idle
+      // Fade starts 8% OUTSIDE warmupBoundary so nodal lines sitting right at the
+      // boundary edge are still fully visible (not clipped by the old 0.85 factor).
+      const particleR = Math.sqrt(x*x + y*y);
+      const fadeEdge  = warmupBoundary * 1.08;
+      const zoneFade  = activeK > 0.05
+        ? Math.max(0.15, 1.0 - Math.max(0, particleR - fadeEdge) * 2.5)
+        : 1.0;
+      lifes[i] = zoneFade * (1.0 - idleWeight * 0.45);
+    }
+
+    // ── 4. Upload to GPU ──────────────────────────────────────────────────────
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufPos);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, positions);
+    gl.vertexAttribPointer(loc.pos, 2, gl.FLOAT, false, 0, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufLife);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, lifes);
+    gl.vertexAttribPointer(loc.life, 1, gl.FLOAT, false, 0, 0);
+
+    // ── 5. Draw (square viewport) ─────────────────────────────────────────────────
+    // Clear full canvas to black first
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    // Then draw particles only in the centred square
+    const vp = squareVP();
+    gl.viewport(vp.x, vp.y, vp.s, vp.s);
+
+    const ptSize = Math.max(1.5, 2.5 * RENDER_DPR * (canvas.height / 800));
+    // Dynamic zoom: keeps figure at ~65% of viewport regardless of activeRadius.
+    // Clamped so tiny radius doesn't blow up and big radius doesn't zoom out.
+    const targetZoom = Math.min(2.2, Math.max(1.1, 0.35 / Math.max(activeRadius, 0.14)));
+    smoothZoom = smoothZoom + (targetZoom - smoothZoom) * 0.03;
+    gl.uniform1f(loc.ptSize,    ptSize);
+    gl.uniform1f(loc.zoom,      smoothZoom);
+    gl.uniform1f(loc.melodyAmp, smoothMelodyAmp);
+    gl.uniform1f(loc.bassAmp,   smoothBassAmp);
+    gl.uniform1f(loc.rms,       smoothRMS);
+
+    gl.drawArrays(gl.POINTS, 0, N_PARTICLES);
+
+    // ── 6. Band meters ────────────────────────────────────────────────────────
+    elBass.style.height = (smoothBassAmp   * 100).toFixed(1) + '%';
+    elMel.style.height  = (smoothMelodyAmp * 100).toFixed(1) + '%';
+    elAvg.style.height  = (smoothAvgAmp    * 100).toFixed(1) + '%';
+  }
+
+  requestAnimationFrame(frame);
+
+  // ═══════════════════════════════════════════════════════
+  //  UI
+  // ═══════════════════════════════════════════════════════
+  let sourceMode = 'mic';  // 'mic' | 'sys'
+  let lastSignalTime = -Infinity;
+
+  const srcSw   = document.getElementById('src-sw');
+  const lblMic  = document.getElementById('lbl-mic');
+  const lblSys  = document.getElementById('lbl-sys');
+  const btnStart = document.getElementById('btn-start');
+
+  srcSw.addEventListener('click', () => {
+    if (audioActive) return;  // don't switch while running
+    sourceMode = sourceMode === 'mic' ? 'sys' : 'mic';
+    srcSw.classList.toggle('sys', sourceMode === 'sys');
+    lblMic.classList.toggle('active', sourceMode === 'mic');
+    lblSys.classList.toggle('active', sourceMode === 'sys');
+  });
+
+  btnStart.addEventListener('click', async () => {
+    if (!audioActive) {
+      try {
+        if (sourceMode === 'sys') {
+          // System audio: louder source, noise gate not needed
+          document.getElementById('sens').value = '1.5';
+          document.getElementById('gate').value = '0';
+          await startSystem();
+        } else {
+          await startMic();
+        }
+        btnStart.textContent = 'STOP';
+        btnStart.classList.add('active');
+        srcSw.style.pointerEvents = 'none';
+        srcSw.style.opacity = '0.4';
+        lastSignalTime = -Infinity;  // start idle clock fresh
+      } catch (e) {
+        alert('Audio capture failed.\n' + e.message);
+      }
+    } else {
+      stopAudio();
+      btnStart.textContent = 'START';
+      btnStart.classList.remove('active');
+      srcSw.style.pointerEvents = '';
+      srcSw.style.opacity = '';
+    }
+  });
+  </script>
+</body>
+</html>
