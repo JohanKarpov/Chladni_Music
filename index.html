@@ -437,7 +437,8 @@
     src.connect(analyser);
     dataArray = new Uint8Array(analyser.frequencyBinCount);
     prevData  = new Uint8Array(analyser.frequencyBinCount);
-    persScore = new Float32Array(analyser.frequencyBinCount);
+    persScore     = new Float32Array(analyser.frequencyBinCount);
+    bassRingScore = new Float32Array(analyser.frequencyBinCount);
     audioActive = true;
   }
 
@@ -482,7 +483,7 @@
       capturedStream = null;
     }
     if (audioCtx) { audioCtx.close(); audioCtx = null; }
-    analyser = null; dataArray = null; prevData = null; persScore = null;
+    analyser = null; dataArray = null; prevData = null; persScore = null; bassRingScore = null;
     audioActive = false;
     // idleWeight will naturally lerp to 1 now that audioActive=false
   }
@@ -492,8 +493,10 @@
   // Persistence scores: how long each bin has been in the top-3 of 300-3500 Hz.
   // Bins that hold a note for >0.5s rise to the top → captures melody/vocals
   // even when louder short-lived transients share the same range.
-  let persScore  = null;  // Float32Array, allocated on first audio connect
-  let persFreq   = 500;   // Hz — current persistent melodic frequency
+  let persScore      = null;  // Float32Array, allocated on first audio connect
+  let persFreq       = 500;   // Hz — current persistent melodic frequency
+  let bassRingScore  = null;  // separate persScore for 50–500 Hz ring modulation
+  let bassRingFreq   = 100;   // Hz — dominant bass frequency for ring standing wave
 
   // Auto-gain: running maximum per channel with slow decay.
   // Adapts to the loudness of each track so meters never clip, sens still fine-tunes.
@@ -515,7 +518,8 @@
     if (rms < gateVal) {
       if (prevData) prevData.set(dataArray);
       return { bassAmp: 0, melodyAmp: 0, melodyFreq: MELODY_LO, avgFreq: 220, avgAmp: 0,
-               rms: 0, centroidNorm: 0.3, spreadNorm: 0.3, flux: 0, persistFreq: persFreq };
+               rms: 0, centroidNorm: 0.3, spreadNorm: 0.3, flux: 0, persistFreq: persFreq,
+               bassFlatness: 0.5 };
     }
 
     // ── SUB BASS  20–80 Hz (kick/sub) ──────────────────────────────────────────
@@ -534,27 +538,59 @@
     autoMaxBass    = Math.max(0.08, Math.max(autoMaxBass * Math.pow(0.9994, frameDtN), bassRaw));
     const bassAmp  = Math.min(1, bassRaw / autoMaxBass * 0.85 * (sens / 2));
 
-    // ── PRESENCE  300–3500 Hz: persistent frequency tracker ─────────────────
-    // Uses per-bin exponential score: bins that stay loud accumulate score.
-    // The highest-scoring bin = melodic/vocal note most prominent to the ear.
-    const presLo = Math.floor(300 / binHz);
-    const presHi = Math.min(Math.floor(3500 / binHz), bins - 1);
-    // Identify top-3 bins this frame
-    let top3 = [presLo, presLo, presLo];
-    for (let i = presLo; i <= presHi; i++) {
-      if (dataArray[i] > dataArray[top3[2]]) {
-        top3[2] = i;
-        if (dataArray[top3[2]] > dataArray[top3[1]]) { [top3[1],top3[2]] = [top3[2],top3[1]]; }
-        if (dataArray[top3[1]] > dataArray[top3[0]]) { [top3[0],top3[1]] = [top3[1],top3[0]]; }
+    // ── BASS SPECTRAL FLATNESS  80–500 Hz ────────────────────────────────────
+    // Geometric mean / arithmetic mean → 0 = pure tone, 1 = white noise / hard clip.
+    // Lets us distinguish a clean contrabass note from a distorted power chord.
+    const bfLo = Math.max(1, Math.floor(80 / binHz));
+    const bfHi = Math.min(Math.floor(500 / binHz), bins - 1);
+    let bfLogSum = 0, bfLinSum = 0;
+    for (let i = bfLo; i <= bfHi; i++) {
+      const v = dataArray[i] + 1;  // +1 avoids log(0)
+      bfLogSum += Math.log(v);
+      bfLinSum += v;
+    }
+    const bfCount      = bfHi - bfLo + 1;
+    const bassFlatness = bfCount > 0
+      ? Math.exp(bfLogSum / bfCount) / (bfLinSum / bfCount)
+      : 0.5;
+
+    // ── PRESENCE: persistent frequency tracker ───────────────────────────────
+    // Split into two separate competitions so loud bass can't crowd out melody:
+    //   Bass range  80–500 Hz : top-1 bin, weight = bassWeight (reduced if distorted)
+    //   Melody range 500–3500 Hz: top-2 bins, weight = 2.2 (boosted)
+    // When both play together melody wins figure selection; bass drives ring only.
+    const presLo    = Math.max(1, Math.floor(80 / binHz));
+    const presHi    = Math.min(Math.floor(3500 / binHz), bins - 1);
+    const pressMid  = Math.min(Math.floor(500 / binHz), bins - 1);  // bass/melody split
+    const bassWeight = 1 - bassFlatness * 0.8;  // 1.0 (clean bass) .. 0.2 (distorted)
+    const melWeight  = 2.2;                      // melody always out-competes bass
+
+    // Top-1 bin in bass range (80–500 Hz)
+    let bTopBin = presLo;
+    for (let i = presLo; i <= pressMid; i++) {
+      if (dataArray[i] > dataArray[bTopBin]) bTopBin = i;
+    }
+    // Top-2 bins in melody range (500–3500 Hz)
+    let mTop0 = pressMid, mTop1 = pressMid;
+    for (let i = pressMid; i <= presHi; i++) {
+      if (dataArray[i] > dataArray[mTop1]) {
+        mTop1 = i;
+        if (dataArray[mTop1] > dataArray[mTop0]) { const tmp = mTop0; mTop0 = mTop1; mTop1 = tmp; }
       }
     }
-    const top3set = new Set(top3);
+    // Build weight map: bin → gain multiplier this frame
+    const voteMap = new Map([
+      [bTopBin, bassWeight],
+      [mTop0,   melWeight],
+      [mTop1,   melWeight],
+    ]);
     if (persScore) {
       const pDecay = Math.pow(0.92, frameDtN);
       const pGain  = 1 - pDecay;
       for (let i = presLo; i <= presHi; i++) {
-        if (top3set.has(i)) persScore[i] = persScore[i] * pDecay + pGain;
-        else                persScore[i] *= pDecay;
+        const w = voteMap.has(i) ? voteMap.get(i) : 0;
+        if (w > 0) persScore[i] = persScore[i] * pDecay + pGain * w;
+        else       persScore[i] *= pDecay;
       }
       let bestBin = presLo, bestScore = 0;
       for (let i = presLo; i <= presHi; i++) {
@@ -619,7 +655,8 @@
     const rmsNorm = Math.min(1, rms / autoMaxRms * 0.85 * (sens / 2));
 
     return { bassAmp, melodyAmp, melodyFreq, avgFreq, avgAmp,
-             rms: rmsNorm, centroidNorm, spreadNorm, flux, persistFreq, subAmp };
+             rms: rmsNorm, centroidNorm, spreadNorm, flux, persistFreq, subAmp,
+             bassFlatness, bassRingFreq };
   }
 
   // ═══════════════════════════════════════════════════════
@@ -682,8 +719,14 @@
   // Spectral features
   let smoothRMS      = 0;
   let smoothCentroid = 0.3;
-  let smoothSpread   = 0.3;
-  let smoothFlux     = 0;
+  let smoothSpread      = 0.3;
+  let smoothFlux        = 0;
+  // 0=pure tone, 1=white noise/hard clip. Separates clean bass from distortion.
+  let smoothBassFlatness = 0.5;
+  // Bass ring standing wave: phase accumulator (radians) and smoothed wave count.
+  let bassRingPhase   = 0;       // advances each frame → travelling wave on the ring
+  let smoothRingWaves = 2;       // smooth interpolation of wave count n
+  let smoothRingAmp   = 0;       // wave amplitude 0..1, rises with clean bass
 
   // smoothM/N: float m,n values fed directly into chladniFG.
   // They continuously lerp toward the target derived from pitchNorm.
@@ -766,6 +809,8 @@
     let rawBass = 0, rawMelody = 0, rawAvg = 0;
     let rawRMS = 0, rawCentroid = 0.3, rawSpread = 0.3, rawFlux = 0;
     let rawPersistFreq = persFreq;
+    let rawBassFlatness = 0.5;
+    let rawBassRingFreq = bassRingFreq;
     if (audioActive) {
       const r = analyzeBands();
       if (r) {
@@ -777,6 +822,8 @@
         rawSpread        = r.spreadNorm;
         rawFlux          = r.flux;
         rawPersistFreq   = r.persistFreq;
+        rawBassFlatness  = r.bassFlatness;
+        rawBassRingFreq  = r.bassRingFreq;
       }
     }
 
@@ -814,12 +861,24 @@
     const bassKick   = kickRaw > kickThresh ? kickRaw : 0;
     smoothBassAmp  = lerp(smoothBassAmp, rawBass, la(0.10));
 
-    smoothMelodyAmp = lerp(smoothMelodyAmp, rawMelody, la(0.07));
-    smoothAvgAmp    = lerp(smoothAvgAmp,    rawAvg,    la(0.08));
-    smoothRMS       = lerp(smoothRMS,       rawRMS,      la(0.10));
-    smoothCentroid  = lerp(smoothCentroid,  rawCentroid, la(0.05));
-    smoothSpread    = lerp(smoothSpread,    rawSpread,   la(0.07));
-    smoothFlux      = lerp(smoothFlux,      rawFlux,     la(0.40));
+    smoothMelodyAmp    = lerp(smoothMelodyAmp,    rawMelody,       la(0.07));
+    smoothAvgAmp       = lerp(smoothAvgAmp,       rawAvg,          la(0.08));
+    smoothRMS          = lerp(smoothRMS,           rawRMS,          la(0.10));
+    smoothCentroid     = lerp(smoothCentroid,      rawCentroid,     la(0.05));
+    smoothSpread       = lerp(smoothSpread,        rawSpread,       la(0.07));
+    smoothFlux         = lerp(smoothFlux,          rawFlux,         la(0.40));
+    smoothBassFlatness = lerp(smoothBassFlatness,  rawBassFlatness, la(0.06));
+
+    // ── Bass ring standing wave ───────────────────────────────────────────────
+    // n = number of standing waves around the ring, mapped from bassRingFreq.
+    // 50 Hz → n≈2, 150 Hz → n≈3, 300 Hz → n≈5, 500 Hz → n≈8.
+    const targetRingWaves = Math.max(2, Math.min(8, Math.round(rawBassRingFreq / 62)));
+    smoothRingWaves = lerp(smoothRingWaves, targetRingWaves, la(0.04));
+    // Amplitude: rises with clean bass, killed by distortion.
+    const targetRingAmp = smoothBassAmp * (1 - smoothBassFlatness * 0.85) * 0.38;
+    smoothRingAmp = lerp(smoothRingAmp, targetRingAmp, la(0.05));
+    // Phase advances proportionally to frequency → faster rotation at higher freq.
+    bassRingPhase += (rawBassRingFreq / 120) * frameDtN * 0.06;
 
     // ── Active radius: spread sets shape, RMS gates overall size ─────────────
     // rmsGateMult adapts to genre: acoustic/bright tracks have strong harmonics
@@ -841,13 +900,19 @@
     const warmupBoundary = lerp(0.15, activeRadius, audioWarmup);
 
     // ── Continuous pitch → Chladni figure ────────────────────────────────────
-    // 1. Map persistent pitch (300-3500 Hz, log) → 0..1
+    // 1. Map persistent pitch (80-3500 Hz, log) → 0..1.
+    //    Range extended to 80 Hz so bass/contrabass fundamentals drive figure
+    //    selection. 80 Hz → floatIdx≈0 (simple), 300 Hz → ≈7, 500 Hz → ≈9.
     const rawPN = Math.max(0, Math.min(1,
-      Math.log2(Math.max(rawPersistFreq, 300) / 300) / Math.log2(3500 / 300)));
+      Math.log2(Math.max(rawPersistFreq, 80) / 80) / Math.log2(3500 / 80)));
     // 2. Smooth the pitch signal. Faster when pitch moves quickly (responsive),
     //    slower when stable (figure settles calmly, like sand finding its place).
-    const pitchVelocity = Math.abs(rawPN - smoothPersNorm);
-    const pitchSmooth   = Math.min(0.12, 0.025 + pitchVelocity * 1.5);
+    //    Dirty/distorted bass: cap is lower → figure transitions stay slow even
+    //    when distortion harmonics cause high pitchVelocity. Chaos comes from
+    //    jitter, not from rapid mode-switching.
+    const pitchVelocity  = Math.abs(rawPN - smoothPersNorm);
+    const pitchSmoothCap = 0.12 - smoothBassFlatness * 0.065;  // 0.12 (clean) .. 0.055 (dirty)
+    const pitchSmooth    = Math.min(pitchSmoothCap, 0.025 + pitchVelocity * 1.5);
     smoothPersNorm = lerp(smoothPersNorm, rawPN, la(pitchSmooth));
 
     // 3. Float index into mode table (0..18.99)
@@ -858,9 +923,8 @@
     const [tM,  tN ] = modeAtFloat(ALL_MODES,     floatIdx);
     const [tMM, tMN] = modeAtFloat(ALL_SEC_MODES, floatIdxS);
 
-    // 5. Lerp smoothM/N toward targets. Rate scales with how fast pitch is moving:
-    //    slow drift → 0.018 (~1.5s to settle); fast jump → up to 0.055 (~0.5s).
-    const figLerp = Math.min(0.055, 0.018 + pitchVelocity * 3.0);
+    // 5. Lerp smoothM/N toward targets. Same cap as pitch tracking.
+    const figLerp = Math.min(pitchSmoothCap, 0.018 + pitchVelocity * 3.0);
     const laFig = la(figLerp);
     smoothM  = lerp(smoothM,  tM,  laFig);
     smoothN  = lerp(smoothN,  tN,  laFig);
@@ -966,16 +1030,19 @@
         }
       }
 
-      // ── Center ring attractor ─────────────────────────────────────────────
-      // Ring scales with warmupBoundary so it stays proportional to the active zone
-      // and doesn't become a giant feature when the radius is small.
-      const RING_R     = warmupBoundary * 0.40;  // 40% of active radius
-      const RING_OUTER = warmupBoundary * 1.50;  // 150% — gentle outer pull
+      // ── Center ring attractor with standing wave modulation ──────────────────
+      // Ring radius is modulated by a standing wave: sin(n·θ − phase).
+      // Clean bass → visible wave crests/troughs. Distorted bass → flat ring.
+      const RING_R_BASE = warmupBoundary * 0.40;
+      const RING_OUTER  = warmupBoundary * 1.50;
+      const θ           = Math.atan2(y, x);
+      const RING_R      = RING_R_BASE * (1 + smoothRingAmp *
+                          Math.sin(smoothRingWaves * θ - bassRingPhase));
       if (rp > 1e-6 && rp < RING_OUTER) {
         const ringStr = 0.004 * Math.max(0.08, activeK) * frameDtN;
         let   radialF;
         if (rp < RING_R) {
-          radialF = +ringStr * (rp / RING_R);
+          radialF = +ringStr * (rp / Math.max(RING_R, 1e-4));
         } else {
           radialF = -ringStr * (1.0 - (rp - RING_R) / (RING_OUTER - RING_R));
         }
@@ -1016,6 +1083,14 @@
         const fluxJ = smoothFlux * 0.020 * activeK * frameDtN;
         velX[i] += (Math.random() - 0.5) * fluxJ;
         velY[i] += (Math.random() - 0.5) * fluxJ;
+      }
+      // ── Distortion chaos: flat/dirty bass → turbulent particle spread ────────
+      // Clean contrabass/bass: smoothBassFlatness ≈ 0 → no extra noise, figure settles.
+      // Distorted power chord / overdriven bass: flatness → 0.7-0.9 → maximum chaos.
+      if (smoothBassFlatness > 0.15 && smoothBassAmp > 0.02 && activeK > 0.05) {
+        const distJ = smoothBassFlatness * smoothBassAmp * 0.030 * activeK * frameDtN;
+        velX[i] += (Math.random() - 0.5) * distJ;
+        velY[i] += (Math.random() - 0.5) * distJ;
       }
 
       // ── Idle drift: Brownian + gentle centre pull (scaled by idleWeight) ──
