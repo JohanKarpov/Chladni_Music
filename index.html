@@ -34,7 +34,27 @@
       flex-wrap: wrap;
       justify-content: center;
       max-width: 92vw;
+      /* auto-hide transition */
+      transition: opacity 0.5s ease, transform 0.5s ease, padding 0.4s ease,
+                  max-width 0.4s ease, border-color 0.4s ease;
+      overflow: hidden;
     }
+
+    /* Collapsed state: a small dot at the bottom */
+    #ui.ui-hidden {
+      opacity: 0.25;
+      padding: 0;
+      max-width: 14px;
+      max-height: 14px;
+      height: 14px;
+      border-radius: 50%;
+      overflow: hidden;
+      cursor: pointer;
+      /* hide children text but keep the dot */
+    }
+    #ui.ui-hidden > * { opacity: 0; pointer-events: none; }
+    #ui:not(.ui-hidden) > * { opacity: 1; transition: opacity 0.3s 0.15s; }
+    #ui.ui-hidden:hover { opacity: 0.7; }
 
     #btn-toggle {
       background: none;
@@ -444,12 +464,15 @@
   }
 
   async function startSystem() {
+    // getDisplayMedia MUST be called synchronously within the click handler
+    // (no await before it) otherwise browsers revoke the user-gesture flag.
+    // We call it first, then connect the stream.
     let stream;
     try {
       // Chrome 105+ accepts video:false for audio-only tab capture
       stream = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: false });
     } catch (_) {
-      // Fallback: request minimal video, stop it immediately
+      // Fallback: request minimal video track, discard it immediately
       stream = await navigator.mediaDevices.getDisplayMedia({
         audio: true,
         video: { width: 1, height: 1 }
@@ -1120,10 +1143,12 @@
     if (!audioActive) {
       try {
         if (sourceMode === 'sys') {
-          // System audio: louder source, noise gate not needed
+          // getDisplayMedia must be the FIRST async call — before any DOM mutation
+          // or other await — otherwise Safari/Chrome revoke the user-gesture token.
+          await startSystem();
+          // Set defaults after capture is granted
           document.getElementById('sens').value = '1.5';
           document.getElementById('gate').value = '0';
-          await startSystem();
         } else {
           await startMic();
         }
@@ -1142,7 +1167,32 @@
       srcSw.style.pointerEvents = '';
       srcSw.style.opacity = '';
     }
+    resetUiTimer(); // keep menu visible after any interaction
   });
+
+  // ── Auto-hide menu ─────────────────────────────────────────────────────────
+  const uiEl = document.getElementById('ui');
+  let uiHideTimer = null;
+
+  function showUi() {
+    uiEl.classList.remove('ui-hidden');
+    clearTimeout(uiHideTimer);
+    uiHideTimer = setTimeout(() => uiEl.classList.add('ui-hidden'), 5000);
+  }
+
+  function resetUiTimer() { showUi(); }
+
+  // Reveal on hover / touch
+  uiEl.addEventListener('mouseenter', showUi);
+  uiEl.addEventListener('click',      showUi);
+  uiEl.addEventListener('touchstart', showUi, { passive: true });
+
+  // Any activity on canvas also resets the timer
+  canvas.addEventListener('mousemove',  resetUiTimer);
+  canvas.addEventListener('touchstart', resetUiTimer, { passive: true });
+
+  // Start the timer immediately
+  showUi();
   </script>
 </body>
 </html>
