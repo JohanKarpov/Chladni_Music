@@ -111,28 +111,6 @@
     }
 
     /* ── Band meters (top-right) ── */
-    #bands {
-      position: fixed;
-      top: 14px;
-      right: 20px;
-      display: flex;
-      gap: 8px;
-      align-items: flex-end;
-      pointer-events: none;
-    }
-    .bw { display: flex; flex-direction: column; align-items: center; gap: 3px; }
-    .bl { font-size: 8px; letter-spacing: 0.1em; color: rgba(255,255,255,0.22); }
-    .bm {
-      width: 3px; height: 36px;
-      background: rgba(255,255,255,0.07);
-      border-radius: 2px;
-      position: relative; overflow: hidden;
-    }
-    .bf {
-      position: absolute; bottom: 0; width: 100%;
-      background: rgba(255,255,255,0.55);
-      border-radius: 2px;
-    }
 
     /* ── Source toggle switch (MIC / SYS) ── */
     #src-sw {
@@ -192,21 +170,6 @@
   <canvas id="c"></canvas>
   <div id="info">CHLADNI PARTICLES</div>
 
-  <!-- Band meters -->
-  <div id="bands">
-    <div class="bw">
-      <div class="bm"><div class="bf" id="bf-bass" style="height:0%"></div></div>
-      <div class="bl">BASS</div>
-    </div>
-    <div class="bw">
-      <div class="bm"><div class="bf" id="bf-mel" style="height:0%"></div></div>
-      <div class="bl">MEL</div>
-    </div>
-    <div class="bw">
-      <div class="bm"><div class="bf" id="bf-avg" style="height:0%"></div></div>
-      <div class="bl">AVG</div>
-    </div>
-  </div>
 
   <div id="ui">
     <!-- Source toggle: hidden on iOS because getDisplayMedia is unsupported -->
@@ -331,6 +294,7 @@
     uniform float u_melodyAmp;
     uniform float u_bassAmp;
     uniform float u_rms;
+    uniform float u_drop;   // 0..1 drop energy, fades after drop trigger
     varying float v_life;
 
     void main() {
@@ -339,17 +303,21 @@
       if (d > 0.25) discard;
 
       // Energy level: drives warmth and brightness
-      float energy = clamp(u_rms * 0.7 + u_melodyAmp * 0.2 + u_bassAmp * 0.15, 0.0, 1.0);
+      float energy = clamp(u_rms * 0.7 + u_melodyAmp * 0.2 + u_bassAmp * 0.15
+                           + u_drop * 0.55, 0.0, 1.0);
       // Deep amber (quiet) → bright near-white (loud) — like sand lit by warm light
       vec3 sand   = vec3(1.00, 0.80, 0.38);   // warm amber-gold
       vec3 bright = vec3(1.00, 0.97, 0.88);   // near-white bloom
+      vec3 dropW  = vec3(1.00, 0.99, 0.96);   // pure white flash on drop
       vec3 col    = mix(sand, bright, energy);
+      col = mix(col, dropW, u_drop * 0.6);
 
       // Bass pulse adds a momentary golden-white flash
       col = mix(col, vec3(1.0, 0.95, 0.70), u_bassAmp * 0.35);
 
       float alpha = (1.0 - d * 4.0)
-                  * (0.42 + 0.30 * u_rms + 0.14 * u_melodyAmp + 0.18 * u_bassAmp)
+                  * (0.42 + 0.30 * u_rms + 0.14 * u_melodyAmp + 0.18 * u_bassAmp
+                     + u_drop * 0.35)
                   * v_life;
       gl_FragColor = vec4(col * alpha, alpha);
     }
@@ -383,6 +351,7 @@
     melodyAmp: gl.getUniformLocation(prog, 'u_melodyAmp'),
     bassAmp:   gl.getUniformLocation(prog, 'u_bassAmp'),
     rms:       gl.getUniformLocation(prog, 'u_rms'),
+    drop:      gl.getUniformLocation(prog, 'u_drop'),
   };
 
   // ═══════════════════════════════════════════════════════
@@ -485,6 +454,20 @@
     if (audioCtx) { audioCtx.close(); audioCtx = null; }
     analyser = null; dataArray = null; prevData = null; persScore = null; bassRingScore = null;
     audioActive = false;
+    hadBassSignal = false;
+    preDropIdle   = 0;
+    dropEnergy    = 0;
+    dropCooldown  = 0;
+    bassDropBase  = 0;
+    subDropBase   = 0;
+    centroidSlow  = 0.3;
+    riserEnergy   = 0;
+    hihatInstant  = 0;
+    hihatSlow     = 0;
+    hihatWaveR    = -1;
+    hihatWaveAmp  = 0;
+    smoothHihat   = 0;
+    smoothVocalPresence = 0;
     // idleWeight will naturally lerp to 1 now that audioActive=false
   }
 
@@ -556,14 +539,19 @@
 
     // ── PRESENCE: persistent frequency tracker ───────────────────────────────
     // Split into two separate competitions so loud bass can't crowd out melody:
-    //   Bass range  80–500 Hz : top-1 bin, weight = bassWeight (reduced if distorted)
-    //   Melody range 500–3500 Hz: top-2 bins, weight = 2.2 (boosted)
-    // When both play together melody wins figure selection; bass drives ring only.
+    //   Bass range  80–500 Hz : top-1 bin, weight = bassWeight (reduced if distorted OR vocal)
+    //   Melody range 500–3500 Hz: top-2 bins, weight = dynamicMelWeight (boosted by vocal)
+    // When vocal is present: voice formants boost melody weight so bass can't hijack figure.
     const presLo    = Math.max(1, Math.floor(80 / binHz));
     const presHi    = Math.min(Math.floor(3500 / binHz), bins - 1);
     const pressMid  = Math.min(Math.floor(500 / binHz), bins - 1);  // bass/melody split
-    const bassWeight = 1 - bassFlatness * 0.8;  // 1.0 (clean bass) .. 0.2 (distorted)
-    const melWeight  = 2.2;                      // melody always out-competes bass
+    // Compute quick vocal proxy here (400-2500Hz, tonal) so we can weight persScore live.
+    // This is a lighter version — full rawVocalPresence with flatness is computed later.
+    const vp2Lo = Math.max(1, Math.floor(400 / binHz)), vp2Hi = Math.min(Math.floor(2500 / binHz), bins-1);
+    let vp2Max = 0; for (let i = vp2Lo; i <= vp2Hi; i++) if (dataArray[i] > vp2Max) vp2Max = dataArray[i];
+    const quickVocal  = vp2Max / 255;  // 0..1, rough proxy
+    const bassWeight  = (1 - bassFlatness * 0.8) * (1 - quickVocal * 0.35); // bass loses weight when voice present
+    const melWeight   = 2.2 + quickVocal * 2.5;  // 2.2 (no voice) → 4.7 (strong voice)
 
     // Top-1 bin in bass range (80–500 Hz)
     let bTopBin = presLo;
@@ -585,16 +573,22 @@
       [mTop1,   melWeight],
     ]);
     if (persScore) {
-      const pDecay = Math.pow(0.92, frameDtN);
+      // pDecay = 0.985 per frame at 180fps → τ ≈ 0.6s — consistent notes dominate
+      // brief transients (old 0.92 = τ 78ms was far too short, caused flickering).
+      const pDecay = Math.pow(0.985, frameDtN);
       const pGain  = 1 - pDecay;
       for (let i = presLo; i <= presHi; i++) {
         const w = voteMap.has(i) ? voteMap.get(i) : 0;
         if (w > 0) persScore[i] = persScore[i] * pDecay + pGain * w;
         else       persScore[i] *= pDecay;
       }
+      // Hysteresis: current winner keeps its position unless challenger beats it
+      // by 20% or more. Prevents rapid oscillation between two nearby frequencies.
+      const prevBin    = Math.round(persFreq / binHz);
       let bestBin = presLo, bestScore = 0;
       for (let i = presLo; i <= presHi; i++) {
-        if (persScore[i] > bestScore) { bestScore = persScore[i]; bestBin = i; }
+        const hyster = (i === prevBin) ? 1.0 : 1.20;
+        if (persScore[i] / hyster > bestScore) { bestScore = persScore[i] / hyster; bestBin = i; }
       }
       persFreq = bestBin * binHz;
     }
@@ -642,6 +636,34 @@
       spreadNum += df * df * dataArray[i];
     }
     const spreadNorm = Math.min(1, (centDen > 0 ? Math.sqrt(spreadNum / centDen) : 0) / 2500);
+
+    // ── HI-HAT  7–16kHz: energy × high-freq flux → transient click/sizzle ──────
+    const hhLo = Math.min(Math.floor(7000 / binHz), bins - 1);
+    const hhHi = Math.min(Math.floor(16000 / binHz), bins - 1);
+    let hhSum = 0, hhFluxSum = 0;
+    for (let i = hhLo; i <= hhHi; i++) {
+      hhSum += dataArray[i];
+      if (prevData) hhFluxSum += Math.max(0, dataArray[i] - prevData[i]);
+    }
+    const hhCount  = Math.max(1, hhHi - hhLo + 1);
+    const hhEnergy = hhSum / (hhCount * 255);
+    const hhFlux   = prevData ? hhFluxSum / (hhCount * 128) : 0;
+    const rawHihat = Math.min(1, hhEnergy * (0.3 + hhFlux * 2.0) * sens * 3.0);
+
+    // ── VOCAL PRESENCE  400–2500Hz: tonal energy (low flatness) ──────────────
+    // Singing has strong harmonics (low Wiener entropy) in formant range.
+    const vcLo = Math.max(1, Math.floor(400 / binHz));
+    const vcHi = Math.min(Math.floor(2500 / binHz), bins - 1);
+    let vcLogSum = 0, vcLinSum = 0, vcMax = 0;
+    for (let i = vcLo; i <= vcHi; i++) {
+      const v = dataArray[i] + 1;
+      vcLogSum += Math.log(v);
+      vcLinSum += v;
+      if (dataArray[i] > vcMax) vcMax = dataArray[i];
+    }
+    const vcCount          = Math.max(1, vcHi - vcLo + 1);
+    const vcFlatness       = Math.exp(vcLogSum / vcCount) / (vcLinSum / vcCount);
+    const rawVocalPresence = (vcMax / 255) * (1 - vcFlatness * 0.85);
 
     // ── SPECTRAL FLUX: positive spectral change → attack / transient ─────────
     let fluxSum = 0;
@@ -700,14 +722,17 @@
   // ═══════════════════════════════════════════════════════
   let smoothBassAmp  = 0;
   let bassInstant    = 0;   // fast EMA for kick transient detection
-  let bassSlowSmooth = 0;   // slow EMA baseline
+  let bassSlowSmooth = 0;   // slow EMA baseline (~0.14s τ) for kick detection
+  let bassDropBase   = 0;   // very slow baseline (~3s τ) for drop detection
 
   let smoothMelodyAmp = 0;
   let smoothAvgAmp    = 0;
 
   // Continuous pitch tracking
-  let smoothPersNorm  = 0.25;  // 0..1 log-scale 300-3500 Hz, current smoothed pitch
-  let prevPersNorm    = 0.25;  // previous frame value — used to compute pitch velocity
+  let smoothPersNorm  = 0.25;  // 0..1 log-scale, current smoothed pitch
+  let prevPersNorm    = 0.25;  // previous frame value
+  let smoothPNVelocity = 0;   // smoothed speed of smoothPersNorm itself (not raw-vs-smooth)
+                               // Distinguishes real note changes from persFreq flicker.
 
   // Active radius state
   let activeRadius = 0.25;
@@ -727,6 +752,31 @@
   let bassRingPhase   = 0;       // advances each frame → travelling wave on the ring
   let smoothRingWaves = 2;       // smooth interpolation of wave count n
   let smoothRingAmp   = 0;       // wave amplitude 0..1, rises with clean bass
+
+  // Drop detector state
+  let dropEnergy    = 0;
+  let dropDecayRate = 0.5;
+  let dropCooldown  = 0;
+  let preDropIdle   = 0;
+  let hadBassSignal = false;
+  let subDropBase   = 0;
+  // Riser detection via spectral centroid:
+  // centroidSlow lags ~2s behind smoothCentroid.
+  // Rising: smoothCentroid > centroidSlow  (fast is ahead = climbing upward)
+  // Drop:   smoothCentroid < centroidSlow  (fast crashed, slow still high)
+  // centroidCrash = centroidSlow - smoothCentroid > 0 only AFTER a riser ends.
+  let centroidSlow = 0.3;
+  let riserEnergy  = 0;  // 0..4: accumulates during sustained centroid rise
+
+  // Hi-hat detector state
+  let hihatInstant = 0;    // fast EMA
+  let hihatSlow    = 0;    // slow EMA baseline
+  let hihatWaveR   = -1;   // wavefront radius in clip-space, -1 = inactive
+  let hihatWaveAmp = 0;    // 0..1 amplitude of current wavefront
+  let smoothHihat  = 0;    // smoothed hi-hat energy for continuous effects
+
+  // Vocal presence detector state
+  let smoothVocalPresence = 0;  // 0..1, high = tonal energy in 400–2500Hz
 
   // smoothM/N: float m,n values fed directly into chladniFG.
   // They continuously lerp toward the target derived from pitchNorm.
@@ -756,6 +806,7 @@
   const REPULSE_R2 = REPULSE_R * REPULSE_R;
   const REPULSE_K  = 0.010;      // base force scale (boosted dynamically by activeK)
   let cursorX = 0, cursorY = 0, cursorActive = false;
+  let lastTouchTime = 0;  // suppress ghost mousemove fired by browser after touchend
 
   function updateCursor(cx, cy) {
     // Map screen coords into the square simulation area (clip-space -1..1)
@@ -769,20 +820,24 @@
     cursorY = -(((cy - offY) / side) * 2 - 1);
     cursorActive = true;
   }
-  canvas.addEventListener('mousemove', e => updateCursor(e.clientX, e.clientY));
+  canvas.addEventListener('mousemove', e => {
+    if (Date.now() - lastTouchTime < 500) return;  // ignore ghost mousemove after touchend
+    updateCursor(e.clientX, e.clientY);
+  });
   canvas.addEventListener('mouseleave', () => { cursorActive = false; });
+  canvas.addEventListener('touchstart', e => {
+    lastTouchTime = Date.now();
+    updateCursor(e.touches[0].clientX, e.touches[0].clientY);
+  }, { passive: true });
   canvas.addEventListener('touchmove', e => {
+    lastTouchTime = Date.now();
     e.preventDefault();
     updateCursor(e.touches[0].clientX, e.touches[0].clientY);
   }, { passive: false });
-  canvas.addEventListener('touchend',   () => { cursorActive = false; });
-  canvas.addEventListener('touchcancel',() => { cursorActive = false; });
+  canvas.addEventListener('touchend',   () => { lastTouchTime = Date.now(); cursorActive = false; });
+  canvas.addEventListener('touchcancel',() => { lastTouchTime = Date.now(); cursorActive = false; });
 
   // ─── Cached DOM refs (avoid querySelector in hot path) ───────────────────────
-  const elBass = document.getElementById('bf-bass');
-  const elMel  = document.getElementById('bf-mel');
-  const elAvg  = document.getElementById('bf-avg');
-
   // ═══════════════════════════════════════════════════════
   //  RENDER LOOP
   // ═══════════════════════════════════════════════════════
@@ -801,6 +856,7 @@
     // Normalize to 180fps baseline (display used during tuning).
     // Cap at 3× to prevent explosions when a tab is backgrounded.
     frameDtN = Math.min(dt * 180, 3.0);
+    const dtSec     = frameDtN / 180;       // seconds per frame (180fps normalized)
     const dampFrame = Math.pow(DAMPING, frameDtN);
     // Converts a per-frame lerp rate tuned for 180fps to the current framerate.
     const la = a => 1 - Math.pow(1 - a, frameDtN);
@@ -811,6 +867,9 @@
     let rawPersistFreq = persFreq;
     let rawBassFlatness = 0.5;
     let rawBassRingFreq = bassRingFreq;
+    let rawSubAmp = 0;
+    let rawHihat  = 0;
+    let rawVocalPresence = 0;
     if (audioActive) {
       const r = analyzeBands();
       if (r) {
@@ -824,6 +883,9 @@
         rawPersistFreq   = r.persistFreq;
         rawBassFlatness  = r.bassFlatness;
         rawBassRingFreq  = r.bassRingFreq || bassRingFreq;
+        rawSubAmp        = r.subAmp || 0;
+        rawHihat         = r.rawHihat || 0;
+        rawVocalPresence = r.rawVocalPresence || 0;
       }
     }
 
@@ -852,6 +914,8 @@
     // Bass: fast + slow EMA → kick = sharp positive spike only
     bassInstant    = lerp(bassInstant,    rawBass, la(0.55));
     bassSlowSmooth = lerp(bassSlowSmooth, rawBass, la(0.04));
+    bassDropBase   = lerp(bassDropBase,   rawBass, la(0.002));  // τ≈3s
+    subDropBase    = lerp(subDropBase,    rawSubAmp, la(0.002)); // τ≈3s, tracks sub-bass baseline
     const kickRaw  = Math.max(0, bassInstant - bassSlowSmooth);
     // Kick threshold adapts to genre: bass-heavy tracks have constant strong bass,
     // so raise the threshold to avoid triggering on every beat. Acoustic tracks
@@ -868,6 +932,93 @@
     smoothSpread       = lerp(smoothSpread,        rawSpread,       la(0.07));
     smoothFlux         = lerp(smoothFlux,          rawFlux,         la(0.40));
     smoothBassFlatness = lerp(smoothBassFlatness,  rawBassFlatness, la(0.06));
+
+    // Hi-hat: fast vs slow EMA → transient detector, same pattern as bassKick
+    hihatInstant = lerp(hihatInstant, rawHihat, la(0.65));
+    hihatSlow    = lerp(hihatSlow,    rawHihat, la(0.06));
+    smoothHihat  = lerp(smoothHihat,  rawHihat, la(0.30));
+    const hihatTransient = Math.max(0, hihatInstant - hihatSlow);
+    // Trigger new wavefront on sharp hi-hat transient (not while another wave is strong)
+    if (hihatTransient > 0.10 && hihatWaveAmp < 0.25) {
+      hihatWaveR   = 0.0;
+      hihatWaveAmp = Math.min(1.0, hihatTransient * 2.0);
+    }
+    // Advance wavefront and decay amplitude
+    if (hihatWaveAmp > 0) {
+      hihatWaveR  += dtSec * 0.8;   // expand at 0.8 clip/s → crosses full plate in ~0.35s
+      hihatWaveAmp = Math.max(0, hihatWaveAmp - dtSec * 3.5);  // decay ~0.3s
+      if (hihatWaveR > 1.5) { hihatWaveR = -1; hihatWaveAmp = 0; }  // retire
+    }
+
+    // Vocal presence
+    smoothVocalPresence = lerp(smoothVocalPresence, rawVocalPresence, la(0.05));
+
+    // Riser: centroidSlow (τ≈7s, la(0.0008)) lags far behind smoothCentroid.
+    // A slow 8s riser raises smoothCentroid by ~0.025/s; with a 7s lag,
+    // the gap builds to 0.1+ at the peak — well above the 0.025 threshold.
+    // (Old la(0.006) had τ≈1s — gap was only 0.025, threshold 0.05, never fired.)
+    centroidSlow = lerp(centroidSlow, rawCentroid, la(0.0008));
+    if (smoothCentroid > centroidSlow + 0.025 && activeK > 0.2) {
+      riserEnergy = Math.min(4.0, riserEnergy + dtSec * 1.0);  // full in ~4s
+    } else {
+      riserEnergy = Math.max(0, riserEnergy - dtSec * 1.5);    // drains in ~0.7s
+    }
+
+    // ── Drop detector ─────────────────────────────────────────────────────
+    // TWO INDEPENDENT PATHS — prevents every kick from triggering the effect.
+    //
+    // PATH A — Breakdown→Drop: bass absent for ≥1s, then returns.
+    //   Works for: EDM breakdowns, hip-hop, future bass, etc.
+    //   Gate: preDropIdle > 1.0s + hadBassSignal (first hit of session never fires).
+    //
+    // PATH B — Riser→Drop: centroid climbed for ~4s, then crashed down to bass.
+    //   Works for: hardstyle, trance, psy, neurofunk, DNB risers.
+    //   Gate: riserEnergy > 2.0. Regular kicks can't raise riserEnergy because
+    //   a bass kick drives centroid DOWN, not up.
+
+    if (!hadBassSignal && smoothBassAmp > 0.25) hadBassSignal = true;
+    if (hadBassSignal) {
+      if (smoothBassAmp < 0.22) {
+        preDropIdle = Math.min(preDropIdle + dtSec, 8.0);
+      } else {
+        preDropIdle = Math.max(0, preDropIdle - dtSec * 0.5);
+      }
+    }
+
+    // Path A: bass returns after breakdown
+    const bassOnsetRatio = bassInstant / (bassDropBase + 0.02);
+    const broadDropScore = Math.max(0, bassOnsetRatio - 1.25) * smoothFlux * (smoothSpread + 0.2);
+    const pathAFires     = broadDropScore > 0.008
+                        && preDropIdle > 1.0
+                        && hadBassSignal
+                        && dropCooldown <= 0;
+
+    // Path B: centroid crash after riser
+    // centroidCrash: fast has fallen below slow (riser ended, bass arrived).
+    // riserEnergy > 2.0 requires ~4s of sustained rising centroid before firing.
+    subDropBase = lerp(subDropBase, rawSubAmp, la(0.002));
+    const centroidCrash  = Math.max(0, centroidSlow - smoothCentroid);
+    const riserDropScore = centroidCrash
+                         * Math.max(0, Math.min(1.0, (riserEnergy - 1.0) / 1.5))
+                         * Math.min(1.0, rawSubAmp * 4 + smoothBassAmp + 0.05)
+                         * 0.14;
+    const pathBFires     = riserDropScore > 0.008
+                        && riserEnergy > 2.0
+                        && dropCooldown <= 0;
+
+    if (pathAFires || pathBFires) {
+      dropEnergy = 1.0;
+      const trigScore     = pathBFires ? riserDropScore : broadDropScore;
+      const dropMagnitude = Math.min(1.0, trigScore / 0.06);
+      dropDecayRate = 1.0 / (1.0 + dropMagnitude * (smoothSpread + 0.3) * 2.5);
+      dropCooldown  = 8.0;
+      preDropIdle   = 0;
+      if (pathBFires) riserEnergy = Math.max(0, riserEnergy - 2.5);  // partial consume
+    }
+    if (dropCooldown > 0) dropCooldown -= dtSec;
+    if (dropEnergy > 0) {
+      dropEnergy = Math.max(0, dropEnergy - dropDecayRate * dtSec);
+    }
 
     // ── Bass ring standing wave ───────────────────────────────────────────────
     // n = number of standing waves around the ring, mapped from bassRingFreq.
@@ -887,7 +1038,7 @@
     // so particles don't escape to the outermost Chladni ring and form an octagon.
     const rmsGateMult  = 5.0 + (1.0 - bassRatioBM) * 5.0;  // 5 (EDM) .. 10 (acoustic)
     const rmsGate      = Math.min(1.0, smoothRMS * rmsGateMult);
-    const radiusCap    = 0.22 + bassRatioBM * 0.08;  // 0.22 (no bass) .. 0.30 (full EDM)
+    const radiusCap    = 0.22 + bassRatioBM * 0.08 + dropEnergy * 0.12;  // expands on drop
     const targetRadius = Math.min(radiusCap, 0.16 + smoothSpread * rmsGate * 0.12);
     activeRadius = lerp(activeRadius, targetRadius, la(0.010));
 
@@ -905,11 +1056,9 @@
     //    selection. 80 Hz → floatIdx≈0 (simple), 300 Hz → ≈7, 500 Hz → ≈9.
     const rawPN = Math.max(0, Math.min(1,
       Math.log2(Math.max(rawPersistFreq, 80) / 80) / Math.log2(3500 / 80)));
-    // 2. Smooth the pitch signal. Faster when pitch moves quickly (responsive),
-    //    slower when stable (figure settles calmly, like sand finding its place).
-    //    Dirty/distorted bass: cap is lower → figure transitions stay slow even
-    //    when distortion harmonics cause high pitchVelocity. Chaos comes from
-    //    jitter, not from rapid mode-switching.
+    // 2. Smooth the pitch signal.
+    //    pitchSmoothCap reduced when bass is distorted: chaos comes from jitter,
+    //    not from rapid mode-switching.
     const pitchVelocity  = Math.abs(rawPN - smoothPersNorm);
     const pitchSmoothCap = 0.12 - smoothBassFlatness * 0.065;  // 0.12 (clean) .. 0.055 (dirty)
     const pitchSmooth    = Math.min(pitchSmoothCap, 0.025 + pitchVelocity * 1.5);
@@ -923,8 +1072,14 @@
     const [tM,  tN ] = modeAtFloat(ALL_MODES,     floatIdx);
     const [tMM, tMN] = modeAtFloat(ALL_SEC_MODES, floatIdxS);
 
-    // 5. Lerp smoothM/N toward targets. Same cap as pitch tracking.
-    const figLerp = Math.min(pitchSmoothCap, 0.018 + pitchVelocity * 3.0);
+    // 5. figLerp driven by smoothPNVelocity — speed of the SMOOTHED pitch,
+    //    not distance raw→smooth.  This correctly separates two cases:
+    //      • Real note change: smoothPersNorm actually moves → spike → fast lerp
+    //      • persFreq flicker: smoothPersNorm stays put → near-zero → slow lerp
+    //    Fast melody (rapid real changes) still gets spikes on each note.
+    smoothPNVelocity = lerp(smoothPNVelocity,
+      Math.abs(smoothPersNorm - prevPersNorm), la(0.15));
+    const figLerp = Math.min(pitchSmoothCap, 0.012 + smoothPNVelocity * 8.0);
     const laFig = la(figLerp);
     smoothM  = lerp(smoothM,  tM,  laFig);
     smoothN  = lerp(smoothN,  tN,  laFig);
@@ -1012,11 +1167,15 @@
           velX[i] -= vn * nx * normalDamp;
           velY[i] -= vn * ny * normalDamp;
           // 3. Tangential jitter — distributes particles along the full line
-          const jt = 0.028 * onLine * activeK * frameDtN;
+          //    Boosted by dropEnergy: on a drop particles fly further along curves.
+          const jt = 0.028 * onLine * activeK * frameDtN * (1 + dropEnergy * 2.5);
           velX[i] += tx * (Math.random() - 0.5) * jt;
           velY[i] += ty * (Math.random() - 0.5) * jt;
-          // 4. Width jitter — line thickness scales with spectral spread
-          const jn = (0.004 + smoothSpread * 0.016) * onLine * activeK * frameDtN;
+          // 4. Width jitter — line thickness: quadratic bass scaling for strong contrast.
+          // During a riser, lines progressively thin as energy climbs upward;
+          // at the drop they snap back to full thickness for maximum visual contrast.
+          const riserThinning = Math.min(0.65, riserEnergy * 0.20);
+          const jn = (0.004 + smoothBassAmp * smoothBassAmp * 0.040) * onLine * activeK * frameDtN * (1.0 - riserThinning);
           velX[i] += nx * (Math.random() - 0.5) * jn;
           velY[i] += ny * (Math.random() - 0.5) * jn;
           // 5. Line-hop: rare random kick perpendicular to line,
@@ -1039,7 +1198,10 @@
       const RING_R      = RING_R_BASE * (1 + smoothRingAmp *
                           Math.sin(smoothRingWaves * θ - bassRingPhase));
       if (rp > 1e-6 && rp < RING_OUTER) {
-        const ringStr = 0.004 * Math.max(0.08, activeK) * frameDtN;
+        // Vocal presence modulates ring strength: 0 vocal → weak ring (10%),
+        // strong singing → full ring (100%). Ring becomes an instrument of the voice.
+        const vocalRingBoost = 0.1 + smoothVocalPresence * 0.9;
+        const ringStr = 0.004 * Math.max(0.08, activeK) * vocalRingBoost * frameDtN;
         let   radialF;
         if (rp < RING_R) {
           radialF = +ringStr * (rp / Math.max(RING_R, 1e-4));
@@ -1078,11 +1240,13 @@
         velX[i] += (Math.random() - 0.5) * bassJ;
         velY[i] += (Math.random() - 0.5) * bassJ;
       }
-      // ── Spectral Flux: shake on attacks and filter sweeps ────────────────────
+      // ── Spectral Flux: tangential shake — particles slide ALONG lines on attacks.
+      // Redirected to tangential so melodic flux makes lines longer/animated but
+      // NOT thicker (omnidirectional flux was incorrectly fattening melodic tracks).
       if (smoothFlux > 0.03 && activeK > 0.05) {
-        const fluxJ = smoothFlux * 0.020 * activeK * frameDtN;
-        velX[i] += (Math.random() - 0.5) * fluxJ;
-        velY[i] += (Math.random() - 0.5) * fluxJ;
+        const fluxJ = smoothFlux * 0.022 * activeK * frameDtN;
+        velX[i] += tx * (Math.random() - 0.5) * fluxJ;
+        velY[i] += ty * (Math.random() - 0.5) * fluxJ;
       }
       // ── Distortion chaos: flat/dirty bass → turbulent particle spread ────────
       // Clean contrabass/bass: smoothBassFlatness ≈ 0 → no extra noise, figure settles.
@@ -1091,6 +1255,26 @@
         const distJ = smoothBassFlatness * smoothBassAmp * 0.030 * activeK * frameDtN;
         velX[i] += (Math.random() - 0.5) * distJ;
         velY[i] += (Math.random() - 0.5) * distJ;
+      }
+
+      // ── Hi-hat wave: expanding ring of jitter + brightness dip ───────────────
+      // Wavefront sweeps from center outward at 0.8 clip/s.
+      // Particles near the wavefront get both normal and tangential jitter,
+      // simulating the way hi-hat splash disturbs settled sand.
+      // life is momentarily reduced near the front → visible dark ring.
+      if (hihatWaveAmp > 0.01 && hihatWaveR >= 0) {
+        const waveDist = Math.abs(rp - hihatWaveR);
+        const waveW    = 0.07;  // wavefront width in clip-space
+        const waveProx = Math.max(0, 1.0 - waveDist / waveW);
+        if (waveProx > 0) {
+          const hhJ = waveProx * hihatWaveAmp * 0.018 * frameDtN;
+          velX[i] += (Math.random() - 0.5) * hhJ;           // radial scatter
+          velY[i] += (Math.random() - 0.5) * hhJ;
+          velX[i] += tx * (Math.random() - 0.5) * hhJ;     // tangential slide
+          velY[i] += ty * (Math.random() - 0.5) * hhJ;
+          // Dim the particle near the wavefront (dark ring effect)
+          lifes[i] = Math.max(0, lifes[i] - waveProx * hihatWaveAmp * 0.25 * dtSec);
+        }
       }
 
       // ── Idle drift: Brownian + gentle centre pull (scaled by idleWeight) ──
@@ -1173,13 +1357,10 @@
     gl.uniform1f(loc.melodyAmp, smoothMelodyAmp);
     gl.uniform1f(loc.bassAmp,   smoothBassAmp);
     gl.uniform1f(loc.rms,       smoothRMS);
+    gl.uniform1f(loc.drop,      dropEnergy);
 
     gl.drawArrays(gl.POINTS, 0, N_PARTICLES);
 
-    // ── 6. Band meters ────────────────────────────────────────────────────────
-    elBass.style.height = (smoothBassAmp   * 100).toFixed(1) + '%';
-    elMel.style.height  = (smoothMelodyAmp * 100).toFixed(1) + '%';
-    elAvg.style.height  = (smoothAvgAmp    * 100).toFixed(1) + '%';
   }
 
   requestAnimationFrame(frame);
