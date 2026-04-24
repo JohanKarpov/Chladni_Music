@@ -238,7 +238,8 @@
   // ═══════════════════════════════════════════════════════
   // ── Performance tier: auto-scales particles + DPR on mobile ──────────────
   const IS_MOBILE  = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
-                     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+                     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1 &&
+                      !window.matchMedia('(pointer: fine)').matches);
   const PERF_TIER  = IS_MOBILE
     ? (navigator.hardwareConcurrency >= 6 ? 1 : 0)   // 0=weak, 1=mid mobile
     : 2;                                              // 2=desktop
@@ -403,9 +404,12 @@
   let audioActive = false;   // true when any source is running
   let capturedStream = null; // keep ref to stop tracks on teardown
 
-  // Detect iOS (all browsers on iOS use WebKit — no getDisplayMedia audio)
+  // Detect iOS: check UA first; fall back to iPad-as-desktop trick,
+  // but exclude real Macs which also report maxTouchPoints > 1 on Apple Silicon —
+  // Macs have a fine (mouse/trackpad) pointer, iPads do not.
   const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-                 (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+                 (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1 &&
+                  !window.matchMedia('(pointer: fine)').matches);
   // Also hide SYS toggle inside Telegram on mobile (getDisplayMedia not available in mobile WebView)
   if (IS_IOS || (TG && IS_MOBILE)) document.getElementById('src-sw').style.display = 'none';
 
