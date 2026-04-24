@@ -2,16 +2,24 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>Chladni Particles</title>
+  <!-- Telegram Web App SDK (no-op outside Telegram) -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #000; overflow: hidden; font-family: sans-serif; }
     canvas { display: block; width: 100vw; height: 100vh; }
 
+    /* Telegram / iOS safe-area support */
+    :root {
+      --tg-safe-bottom: env(safe-area-inset-bottom, 0px);
+      --tg-safe-top:    env(safe-area-inset-top,    0px);
+    }
+
     #ui {
       position: fixed;
-      bottom: 24px;
+      bottom: calc(24px + var(--tg-safe-bottom));
       left: 50%;
       transform: translateX(-50%);
       display: flex;
@@ -200,6 +208,32 @@
 
   <script>
   // ═══════════════════════════════════════════════════════
+  //  TELEGRAM WEB APP INIT
+  // ═══════════════════════════════════════════════════════
+  const TG = window.Telegram?.WebApp ?? null;
+  if (TG) {
+    TG.ready();
+    TG.expand();
+    // Force black immersive UI (hides Telegram's header bar)
+    if (TG.setHeaderColor)    TG.setHeaderColor('#000000');
+    if (TG.setBackgroundColor) TG.setBackgroundColor('#000000');
+    // Back button → close the mini app
+    if (TG.BackButton) {
+      TG.BackButton.show();
+      TG.BackButton.onClick(() => TG.close());
+    }
+    // Disable the swipe-to-close gesture so vertical swipes don't dismiss
+    if (TG.disableClosingConfirmation) TG.disableClosingConfirmation();
+    if (TG.enableClosingConfirmation)  TG.enableClosingConfirmation();
+    if (TG.setSwipeBehavior)  TG.setSwipeBehavior({ allow_vertical_swipe: false });
+  }
+
+  // Helper: haptic feedback on beat kick (gracefully no-op outside Telegram)
+  function tgHaptic(style) {
+    try { TG?.HapticFeedback?.impactOccurred(style); } catch (_) {}
+  }
+
+  // ═══════════════════════════════════════════════════════
   //  CONFIG
   // ═══════════════════════════════════════════════════════
   // ── Performance tier: auto-scales particles + DPR on mobile ──────────────
@@ -232,12 +266,25 @@
   if (!gl) { alert('WebGL not supported'); throw new Error('no webgl'); }
 
   function resize() {
-    canvas.width  = window.innerWidth  * RENDER_DPR | 0;
-    canvas.height = window.innerHeight * RENDER_DPR | 0;
+    // Use Telegram's stable viewport height when available to avoid
+    // the jitter caused by the virtual keyboard / toolbar on iOS.
+    const w = window.innerWidth;
+    const h = (TG?.viewportStableHeight && TG.viewportStableHeight > 50)
+              ? TG.viewportStableHeight
+              : window.innerHeight;
+    canvas.width  = w * RENDER_DPR | 0;
+    canvas.height = h * RENDER_DPR | 0;
+    // Also update CSS safe-area bottom from TG safeAreaInset if provided
+    if (TG?.safeAreaInset) {
+      document.documentElement.style.setProperty(
+        '--tg-safe-bottom', TG.safeAreaInset.bottom + 'px');
+    }
     // viewport is set per-frame as a centred square
   }
   resize();
   window.addEventListener('resize', resize);
+  // Telegram fires this when the mini-app viewport changes (keyboard, expand, etc.)
+  if (TG) TG.onEvent('viewportChanged', resize);
 
   // Helper: compute square viewport (centred, min side)
   function squareVP() {
@@ -359,7 +406,8 @@
   // Detect iOS (all browsers on iOS use WebKit — no getDisplayMedia audio)
   const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
                  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  if (IS_IOS) document.getElementById('src-sw').style.display = 'none';
+  // Also hide SYS toggle inside Telegram (getDisplayMedia not available in WebView)
+  if (IS_IOS || TG) document.getElementById('src-sw').style.display = 'none';
 
   async function connectStream(stream) {
     capturedStream = stream;
@@ -376,7 +424,18 @@
   }
 
   async function startMic() {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    // Disable voice-processing constraints so the OS doesn't switch to
+    // an exclusive "voice call" audio session — this lets music from the
+    // device speaker keep playing while we only read the microphone signal.
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation:   false,
+        noiseSuppression:   false,
+        autoGainControl:    false,
+        channelCount:       1,
+      },
+      video: false
+    });
     await connectStream(stream);
   }
 
@@ -643,9 +702,12 @@
 
   function updateCursor(cx, cy) {
     // Map screen coords into the square simulation area (clip-space -1..1)
-    const side   = Math.min(window.innerWidth, window.innerHeight);
-    const offX   = (window.innerWidth  - side) / 2;
-    const offY   = (window.innerHeight - side) / 2;
+    const vw   = window.innerWidth;
+    const vh   = (TG?.viewportStableHeight && TG.viewportStableHeight > 50)
+                 ? TG.viewportStableHeight : window.innerHeight;
+    const side = Math.min(vw, vh);
+    const offX = (vw - side) / 2;
+    const offY = (vh - side) / 2;
     cursorX =  ((cx - offX) / side) * 2 - 1;
     cursorY = -(((cy - offY) / side) * 2 - 1);
     cursorActive = true;
