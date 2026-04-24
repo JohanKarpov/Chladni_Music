@@ -519,7 +519,7 @@
       if (prevData) prevData.set(dataArray);
       return { bassAmp: 0, melodyAmp: 0, melodyFreq: MELODY_LO, avgFreq: 220, avgAmp: 0,
                rms: 0, centroidNorm: 0.3, spreadNorm: 0.3, flux: 0, persistFreq: persFreq,
-               bassFlatness: 0.5 };
+               bassFlatness: 0.5, bassRingFreq };
     }
 
     // ── SUB BASS  20–80 Hz (kick/sub) ──────────────────────────────────────────
@@ -823,7 +823,7 @@
         rawFlux          = r.flux;
         rawPersistFreq   = r.persistFreq;
         rawBassFlatness  = r.bassFlatness;
-        rawBassRingFreq  = r.bassRingFreq;
+        rawBassRingFreq  = r.bassRingFreq || bassRingFreq;
       }
     }
 
@@ -872,7 +872,7 @@
     // ── Bass ring standing wave ───────────────────────────────────────────────
     // n = number of standing waves around the ring, mapped from bassRingFreq.
     // 50 Hz → n≈2, 150 Hz → n≈3, 300 Hz → n≈5, 500 Hz → n≈8.
-    const targetRingWaves = Math.max(2, Math.min(8, Math.round(rawBassRingFreq / 62)));
+    const targetRingWaves = Math.max(2, Math.min(8, Math.round((rawBassRingFreq || 100) / 62)));
     smoothRingWaves = lerp(smoothRingWaves, targetRingWaves, la(0.04));
     // Amplitude: rises with clean bass, killed by distortion.
     const targetRingAmp = smoothBassAmp * (1 - smoothBassFlatness * 0.85) * 0.38;
