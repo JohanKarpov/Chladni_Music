@@ -248,11 +248,6 @@
     if (TG.setSwipeBehavior)  TG.setSwipeBehavior({ allow_vertical_swipe: false });
   }
 
-  // Helper: haptic feedback on beat kick (gracefully no-op outside Telegram)
-  function tgHaptic(style) {
-    try { TG?.HapticFeedback?.impactOccurred(style); } catch (_) {}
-  }
-
   // ═══════════════════════════════════════════════════════
   //  CONFIG
   // ═══════════════════════════════════════════════════════
@@ -275,7 +270,6 @@
   const AVG_FRAMES  = 20;
 
   // Frequency band ranges (Hz)
-  const BASS_LO   = 20,   BASS_HI   = 250;
   const MELODY_LO = 500,  MELODY_HI = 4000;
   const AVG_LO    = 80,   AVG_HI    = 4000;
 
@@ -500,7 +494,6 @@
   // even when louder short-lived transients share the same range.
   let persScore  = null;  // Float32Array, allocated on first audio connect
   let persFreq   = 500;   // Hz — current persistent melodic frequency
-  let persSmooth = 0.5;   // 0..1 normalised (log-scale 300-3500 Hz)
 
   // Auto-gain: running maximum per channel with slow decay.
   // Adapts to the loudness of each track so meters never clip, sens still fine-tunes.
@@ -538,7 +531,7 @@
     let bassSum = 0;
     for (let i = bassLo; i <= bassHi; i++) bassSum += dataArray[i];
     const bassRaw = bassSum / ((bassHi - bassLo + 1) * 255);
-    autoMaxBass    = Math.max(0.08, Math.max(autoMaxBass * 0.9994, bassRaw));
+    autoMaxBass    = Math.max(0.08, Math.max(autoMaxBass * Math.pow(0.9994, frameDtN), bassRaw));
     const bassAmp  = Math.min(1, bassRaw / autoMaxBass * 0.85 * (sens / 2));
 
     // ── PRESENCE  300–3500 Hz: persistent frequency tracker ─────────────────
@@ -557,9 +550,11 @@
     }
     const top3set = new Set(top3);
     if (persScore) {
+      const pDecay = Math.pow(0.92, frameDtN);
+      const pGain  = 1 - pDecay;
       for (let i = presLo; i <= presHi; i++) {
-        if (top3set.has(i)) persScore[i] = persScore[i] * 0.92 + 0.08;
-        else                persScore[i] *= 0.92;
+        if (top3set.has(i)) persScore[i] = persScore[i] * pDecay + pGain;
+        else                persScore[i] *= pDecay;
       }
       let bestBin = presLo, bestScore = 0;
       for (let i = presLo; i <= presHi; i++) {
@@ -578,7 +573,7 @@
     }
     const melodyFreq = melBin * binHz;
     const melRaw     = melMax / 255;
-    autoMaxMel       = Math.max(0.08, Math.max(autoMaxMel * 0.9994, melRaw));
+    autoMaxMel       = Math.max(0.08, Math.max(autoMaxMel * Math.pow(0.9994, frameDtN), melRaw));
     const melodyAmp  = Math.min(1, melRaw / autoMaxMel * 0.85 * (sens / 2));
 
     // ── AVG DOMINANT  80–4000 Hz: rolling ~50 ms ──────────────────────────────
@@ -592,7 +587,7 @@
     if (freqHistory.length > AVG_FRAMES) freqHistory.shift();
     const avgFreq = freqHistory.reduce((a, b) => a + b, 0) / freqHistory.length;
     const avgRaw  = avgMax / 255;
-    autoMaxAvg    = Math.max(0.08, Math.max(autoMaxAvg * 0.9994, avgRaw));
+    autoMaxAvg    = Math.max(0.08, Math.max(autoMaxAvg * Math.pow(0.9994, frameDtN), avgRaw));
     const avgAmp  = Math.min(1, avgRaw / autoMaxAvg * 0.85 * (sens / 2));
 
     // ── SPECTRAL CENTROID (80–8000 Hz): weighted mean frequency ─────────────
@@ -620,7 +615,7 @@
     const flux = Math.min(1, (fluxSum / (cHi - cLo + 1) / 255) * sens * 10);
     if (prevData) prevData.set(dataArray);
 
-    autoMaxRms    = Math.max(0.05, Math.max(autoMaxRms * 0.9994, rms));
+    autoMaxRms    = Math.max(0.05, Math.max(autoMaxRms * Math.pow(0.9994, frameDtN), rms));
     const rmsNorm = Math.min(1, rms / autoMaxRms * 0.85 * (sens / 2));
 
     return { bassAmp, melodyAmp, melodyFreq, avgFreq, avgAmp,
@@ -646,14 +641,6 @@
     [4,7],[5,7],[3,8],[2,9],[5,8],
     [4,9],[5,9],[3,10],[6,7],[4,11],
   ];
-
-  function freqToMN(freq, modes, loHz, hiHz) {
-    // kept for potential future use, but mode selection is now timer-based
-    const t   = Math.log2(Math.max(freq, loHz) / loHz) / Math.log2(hiHz / loHz);
-    const tc  = Math.max(0, Math.min(1, t));
-    const idx = Math.min(Math.floor(tc * modes.length), modes.length - 1);
-    return { m: modes[idx][0], n: modes[idx][1] };
-  }
 
   // Classic Chladni free-plate formula: cos(mπx)·cos(nπy) + cos(nπx)·cos(mπy).
   // m, n must be integers. Returns field value f and gradient (fx, fy).
@@ -758,6 +745,9 @@
   // ═══════════════════════════════════════════════════════
   // Visual zoom: maps particle positions (clustered near activeRadius) to ~65% of screen
   let smoothZoom = 1.5;
+  // Frame-rate normalization factor: updated each frame to dt*180 so all
+  // physics constants remain identical regardless of display refresh rate.
+  let frameDtN = 1.0;
 
   let lastTime = 0;
 
@@ -765,9 +755,15 @@
     requestAnimationFrame(frame);
     const dt = Math.min((ts - lastTime) / 1000, 0.05);
     lastTime = ts;
+    // Normalize to 180fps baseline (display used during tuning).
+    // Cap at 3× to prevent explosions when a tab is backgrounded.
+    frameDtN = Math.min(dt * 180, 3.0);
+    const dampFrame = Math.pow(DAMPING, frameDtN);
+    // Converts a per-frame lerp rate tuned for 180fps to the current framerate.
+    const la = a => 1 - Math.pow(1 - a, frameDtN);
 
     // ── 1. Audio ──────────────────────────────────────────────────────────────
-    let rawBass = 0, rawMelody = 0, melFreq = MELODY_LO, avgFreq = 220, rawAvg = 0;
+    let rawBass = 0, rawMelody = 0, rawAvg = 0;
     let rawRMS = 0, rawCentroid = 0.3, rawSpread = 0.3, rawFlux = 0;
     let rawPersistFreq = persFreq;
     if (audioActive) {
@@ -775,8 +771,6 @@
       if (r) {
         rawBass          = r.bassAmp;
         rawMelody        = r.melodyAmp;
-        melFreq          = r.melodyFreq;
-        avgFreq          = r.avgFreq;
         rawAvg           = r.avgAmp;
         rawRMS           = r.rms;
         rawCentroid      = r.centroidNorm;
@@ -798,19 +792,19 @@
     // hasSignal threshold adapts: acoustic tracks are quieter overall, so lower
     // the bar for them. Bass-heavy tracks have strong bass signal → normal bar.
     if (!audioActive) {
-      idleWeight = lerp(idleWeight, 1.0, 0.05);
+      idleWeight = lerp(idleWeight, 1.0, la(0.05));
     } else {
       const sigThresh = 0.007 + bassRatioBM * 0.013;  // 0.007 (acoustic) .. 0.020 (EDM)
       const hasSignal = rawAvg > sigThresh || rawBass > sigThresh;
-      idleWeight = lerp(idleWeight, hasSignal ? 0.0 : 1.0, 0.016);
+      idleWeight = lerp(idleWeight, hasSignal ? 0.0 : 1.0, la(0.016));
     }
     const activeK = 1.0 - idleWeight;  // 0..1 — scales Chladni forces
 
     // ── 3. Smooth / detect transients ────────────────────────────────────────
 
     // Bass: fast + slow EMA → kick = sharp positive spike only
-    bassInstant    = lerp(bassInstant,    rawBass, 0.55);
-    bassSlowSmooth = lerp(bassSlowSmooth, rawBass, 0.04);
+    bassInstant    = lerp(bassInstant,    rawBass, la(0.55));
+    bassSlowSmooth = lerp(bassSlowSmooth, rawBass, la(0.04));
     const kickRaw  = Math.max(0, bassInstant - bassSlowSmooth);
     // Kick threshold adapts to genre: bass-heavy tracks have constant strong bass,
     // so raise the threshold to avoid triggering on every beat. Acoustic tracks
@@ -818,14 +812,14 @@
     // bassKick = full kickRaw value (not a difference) — only the gate adapts.
     const kickThresh = 0.040 + bassRatioBM * 0.070;  // 0.040 (acoustic) .. 0.110 (EDM)
     const bassKick   = kickRaw > kickThresh ? kickRaw : 0;
-    smoothBassAmp  = lerp(smoothBassAmp, rawBass, 0.10);
+    smoothBassAmp  = lerp(smoothBassAmp, rawBass, la(0.10));
 
-    smoothMelodyAmp = lerp(smoothMelodyAmp, rawMelody, 0.07);
-    smoothAvgAmp    = lerp(smoothAvgAmp,    rawAvg,    0.08);
-    smoothRMS       = lerp(smoothRMS,       rawRMS,      0.10);
-    smoothCentroid  = lerp(smoothCentroid,  rawCentroid, 0.05);
-    smoothSpread    = lerp(smoothSpread,    rawSpread,   0.07);
-    smoothFlux      = lerp(smoothFlux,      rawFlux,     0.40);
+    smoothMelodyAmp = lerp(smoothMelodyAmp, rawMelody, la(0.07));
+    smoothAvgAmp    = lerp(smoothAvgAmp,    rawAvg,    la(0.08));
+    smoothRMS       = lerp(smoothRMS,       rawRMS,      la(0.10));
+    smoothCentroid  = lerp(smoothCentroid,  rawCentroid, la(0.05));
+    smoothSpread    = lerp(smoothSpread,    rawSpread,   la(0.07));
+    smoothFlux      = lerp(smoothFlux,      rawFlux,     la(0.40));
 
     // ── Active radius: spread sets shape, RMS gates overall size ─────────────
     // rmsGateMult adapts to genre: acoustic/bright tracks have strong harmonics
@@ -836,12 +830,12 @@
     const rmsGate      = Math.min(1.0, smoothRMS * rmsGateMult);
     const radiusCap    = 0.22 + bassRatioBM * 0.08;  // 0.22 (no bass) .. 0.30 (full EDM)
     const targetRadius = Math.min(radiusCap, 0.16 + smoothSpread * rmsGate * 0.12);
-    activeRadius = lerp(activeRadius, targetRadius, 0.010);
+    activeRadius = lerp(activeRadius, targetRadius, la(0.010));
 
     // audioWarmup rises when audio is active, resets quickly when audio stops.
     // Starts at 0 so figure forms compact before expanding to full activeRadius.
     audioWarmup = lerp(audioWarmup, activeK > 0.15 ? 1.0 : 0.0,
-                       activeK > 0.15 ? 0.004 : 0.05);
+                       la(activeK > 0.15 ? 0.004 : 0.05));
     // warmupBoundary: holds particles inside a small region while figure settles,
     // then gradually unlocks the full activeRadius over ~5 seconds.
     const warmupBoundary = lerp(0.15, activeRadius, audioWarmup);
@@ -854,7 +848,7 @@
     //    slower when stable (figure settles calmly, like sand finding its place).
     const pitchVelocity = Math.abs(rawPN - smoothPersNorm);
     const pitchSmooth   = Math.min(0.12, 0.025 + pitchVelocity * 1.5);
-    smoothPersNorm = lerp(smoothPersNorm, rawPN, pitchSmooth);
+    smoothPersNorm = lerp(smoothPersNorm, rawPN, la(pitchSmooth));
 
     // 3. Float index into mode table (0..18.99)
     const floatIdx  = smoothPersNorm * (ALL_MODES.length - 1);
@@ -867,10 +861,11 @@
     // 5. Lerp smoothM/N toward targets. Rate scales with how fast pitch is moving:
     //    slow drift → 0.018 (~1.5s to settle); fast jump → up to 0.055 (~0.5s).
     const figLerp = Math.min(0.055, 0.018 + pitchVelocity * 3.0);
-    smoothM  = lerp(smoothM,  tM,  figLerp);
-    smoothN  = lerp(smoothN,  tN,  figLerp);
-    smoothMM = lerp(smoothMM, tMM, figLerp);
-    smoothMN = lerp(smoothMN, tMN, figLerp);
+    const laFig = la(figLerp);
+    smoothM  = lerp(smoothM,  tM,  laFig);
+    smoothN  = lerp(smoothN,  tN,  laFig);
+    smoothMM = lerp(smoothMM, tMM, laFig);
+    smoothMN = lerp(smoothMN, tMN, laFig);
     prevPersNorm = smoothPersNorm;
 
     // ── 4. Particle update ────────────────────────────────────────────────────
@@ -888,10 +883,10 @@
 
       // ── Soft clamp: push back from edges + hard clamp with local var update ──
       const EDGE = 0.88;
-      if (x >  EDGE) velX[i] -= (x - EDGE) * 0.018;
-      if (x < -EDGE) velX[i] -= (x + EDGE) * 0.018;
-      if (y >  EDGE) velY[i] -= (y - EDGE) * 0.018;
-      if (y < -EDGE) velY[i] -= (y + EDGE) * 0.018;
+      if (x >  EDGE) velX[i] -= (x - EDGE) * 0.018 * frameDtN;
+      if (x < -EDGE) velX[i] -= (x + EDGE) * 0.018 * frameDtN;
+      if (y >  EDGE) velY[i] -= (y - EDGE) * 0.018 * frameDtN;
+      if (y < -EDGE) velY[i] -= (y + EDGE) * 0.018 * frameDtN;
       // Hard clamp: update local x/y so the final position write uses clamped value
       if (x >  1.05) { x =  1.05; velX[i] *= -0.3; }
       if (x < -1.05) { x = -1.05; velX[i] *= -0.3; }
@@ -905,7 +900,7 @@
       const r2p = x*x + y*y;
       const rp  = Math.sqrt(r2p) + 1e-6;
       if (rp > warmupBoundary) {
-        const pull = (rp - warmupBoundary) * 0.035 * Math.max(0.35, activeK);
+        const pull = (rp - warmupBoundary) * 0.035 * Math.max(0.35, activeK) * frameDtN;
         velX[i] -= (x / rp) * pull;
         velY[i] -= (y / rp) * pull;
       }
@@ -924,14 +919,10 @@
       // Target eval radius at boundary: ~0.42. Capped at PLATE_SCALE*2.
       const dynPS = Math.min(PLATE_SCALE * 2.0, 0.42 / Math.max(activeRadius, 0.14));
 
-      let absSecF = 0;
-      let mainF   = 0;
-
       // ── Chladni attraction + tangential sliding ──────────────────────────
       const { f, fx, fy } = chladniFG(x * dynPS, y * dynPS, smoothM, smoothN);
       // gradient is in formula-space; scale back to clip-space
       const fxC = fx * dynPS, fyC = fy * dynPS;
-      mainF = f;
       const gLen = Math.sqrt(fxC*fxC + fyC*fyC) + 1e-6;
       // Gradient unit vector (normal to line) + tangent (along line)
       const nx = fxC / gLen,  ny = fyC / gLen;
@@ -939,8 +930,8 @@
 
       // 1. Pull toward nodal line (spring-like: stronger when further)
       // centreMask reduces this force near origin so particles can settle there.
-      velX[i] += nx * (-Math.tanh(f * 4.0) * mainAttr * centreMask);
-      velY[i] += ny * (-Math.tanh(f * 4.0) * mainAttr * centreMask);
+      velX[i] += nx * (-Math.tanh(f * 4.0) * mainAttr * centreMask) * frameDtN;
+      velY[i] += ny * (-Math.tanh(f * 4.0) * mainAttr * centreMask) * frameDtN;
 
       if (activeK > 0.05) {
         // Proximity weight: 1.0 on the line, 0 at |f|=0.30
@@ -952,21 +943,22 @@
           const vn         = velX[i] * nx + velY[i] * ny;
           const spd        = Math.sqrt(velX[i]*velX[i] + velY[i]*velY[i]);
           const speedFactor = Math.min(1.0, spd / MAX_SPEED);
-          const normalDamp  = 0.55 * onLine * (1.0 - speedFactor * 0.75);
+          const normalDampBase = 0.55 * onLine * (1.0 - speedFactor * 0.75);
+          const normalDamp     = 1.0 - Math.pow(1.0 - normalDampBase, frameDtN);
           velX[i] -= vn * nx * normalDamp;
           velY[i] -= vn * ny * normalDamp;
           // 3. Tangential jitter — distributes particles along the full line
-          const jt = 0.028 * onLine * activeK;
+          const jt = 0.028 * onLine * activeK * frameDtN;
           velX[i] += tx * (Math.random() - 0.5) * jt;
           velY[i] += ty * (Math.random() - 0.5) * jt;
           // 4. Width jitter — line thickness scales with spectral spread
-          const jn = (0.004 + smoothSpread * 0.016) * onLine * activeK;
+          const jn = (0.004 + smoothSpread * 0.016) * onLine * activeK * frameDtN;
           velX[i] += nx * (Math.random() - 0.5) * jn;
           velY[i] += ny * (Math.random() - 0.5) * jn;
           // 5. Line-hop: rare random kick perpendicular to line,
           //    like a grain of sand bouncing to an adjacent nodal line.
           //    Probability ~0.3% per particle per frame when on a line.
-          if (Math.random() < 0.003 * activeK) {
+          if (Math.random() < 0.003 * activeK * frameDtN) {
             const hopStr = (0.006 + smoothRMS * 0.010) * (Math.random() < 0.5 ? 1 : -1);
             velX[i] += nx * hopStr;
             velY[i] += ny * hopStr;
@@ -980,7 +972,7 @@
       const RING_R     = warmupBoundary * 0.40;  // 40% of active radius
       const RING_OUTER = warmupBoundary * 1.50;  // 150% — gentle outer pull
       if (rp > 1e-6 && rp < RING_OUTER) {
-        const ringStr = 0.004 * Math.max(0.08, activeK);
+        const ringStr = 0.004 * Math.max(0.08, activeK) * frameDtN;
         let   radialF;
         if (rp < RING_R) {
           radialF = +ringStr * (rp / RING_R);
@@ -995,11 +987,8 @@
         const sec    = chladniFG(x * PLATE_SCALE, y * PLATE_SCALE, smoothMM, smoothMN);
         const secFxC = sec.fx * PLATE_SCALE, secFyC = sec.fy * PLATE_SCALE;
         const sgLen  = Math.sqrt(secFxC*secFxC + secFyC*secFyC) + 1e-6;
-        velX[i] += secFxC * (-sec.f / sgLen * secAttr);
-        velY[i] += secFyC * (-sec.f / sgLen * secAttr);
-        absSecF = Math.abs(sec.f);
-      } else {
-        absSecF = Math.abs(f);
+        velX[i] += secFxC * (-sec.f / sgLen * secAttr) * frameDtN;
+        velY[i] += secFyC * (-sec.f / sgLen * secAttr) * frameDtN;
       }
 
       // ── Bass: kick transient shake ──────────────────────────────────────────────
@@ -1018,31 +1007,31 @@
       }
       // ── Bass: continuous jitter (sustained bass level keeps particles alive) ─
       if (smoothBassAmp > 0.025 && activeK > 0.05) {
-        const bassJ = smoothBassAmp * 0.012 * activeK;
+        const bassJ = smoothBassAmp * 0.012 * activeK * frameDtN;
         velX[i] += (Math.random() - 0.5) * bassJ;
         velY[i] += (Math.random() - 0.5) * bassJ;
       }
       // ── Spectral Flux: shake on attacks and filter sweeps ────────────────────
       if (smoothFlux > 0.03 && activeK > 0.05) {
-        const fluxJ = smoothFlux * 0.020 * activeK;
+        const fluxJ = smoothFlux * 0.020 * activeK * frameDtN;
         velX[i] += (Math.random() - 0.5) * fluxJ;
         velY[i] += (Math.random() - 0.5) * fluxJ;
       }
 
       // ── Idle drift: Brownian + gentle centre pull (scaled by idleWeight) ──
       if (idleWeight > 0.01) {
-        velX[i] += (Math.random() - 0.5) * IDLE_JITTER * idleWeight;
-        velY[i] += (Math.random() - 0.5) * IDLE_JITTER * idleWeight;
-        velX[i] -= x * 0.0010 * idleWeight;  // stronger centre pull during silence
-        velY[i] -= y * 0.0010 * idleWeight;
+        velX[i] += (Math.random() - 0.5) * IDLE_JITTER * idleWeight * frameDtN;
+        velY[i] += (Math.random() - 0.5) * IDLE_JITTER * idleWeight * frameDtN;
+        velX[i] -= x * 0.0010 * idleWeight * frameDtN;  // stronger centre pull during silence
+        velY[i] -= y * 0.0010 * idleWeight * frameDtN;
       }
 
       // Baseline Brownian — light noise so particles don’t freeze entirely
-      velX[i] += (Math.random() - 0.5) * 0.0006;
-      velY[i] += (Math.random() - 0.5) * 0.0006;
+      velX[i] += (Math.random() - 0.5) * 0.0006 * frameDtN;
+      velY[i] += (Math.random() - 0.5) * 0.0006 * frameDtN;
 
-      velX[i] *= DAMPING;
-      velY[i] *= DAMPING;
+      velX[i] *= dampFrame;
+      velY[i] *= dampFrame;
 
       // ── Velocity cap: sand grains can't move faster than MAX_SPEED ──────────
       const spd2 = velX[i]*velX[i] + velY[i]*velY[i];
@@ -1060,7 +1049,7 @@
         const dy = y - cursorY;
         const d2 = dx*dx + dy*dy;
         if (d2 < REPULSE_R2 && d2 > 1e-6) {
-          const repK  = REPULSE_K * (1.0 + activeK * 4.0);
+          const repK  = REPULSE_K * (1.0 + activeK * 4.0) * frameDtN;
           const scale = (REPULSE_R2 - d2) / REPULSE_R2 * repK;
           velX[i] += dx * scale;
           velY[i] += dy * scale;
@@ -1103,7 +1092,7 @@
     // Dynamic zoom: keeps figure at ~65% of viewport regardless of activeRadius.
     // Clamped so tiny radius doesn't blow up and big radius doesn't zoom out.
     const targetZoom = Math.min(2.2, Math.max(1.1, 0.35 / Math.max(activeRadius, 0.14)));
-    smoothZoom = smoothZoom + (targetZoom - smoothZoom) * 0.03;
+    smoothZoom = smoothZoom + (targetZoom - smoothZoom) * la(0.03);
     gl.uniform1f(loc.ptSize,    ptSize);
     gl.uniform1f(loc.zoom,      smoothZoom);
     gl.uniform1f(loc.melodyAmp, smoothMelodyAmp);
@@ -1124,7 +1113,6 @@
   //  UI
   // ═══════════════════════════════════════════════════════
   let sourceMode = 'mic';  // 'mic' | 'sys'
-  let lastSignalTime = -Infinity;
 
   const srcSw   = document.getElementById('src-sw');
   const lblMic  = document.getElementById('lbl-mic');
@@ -1156,7 +1144,6 @@
         btnStart.classList.add('active');
         srcSw.style.pointerEvents = 'none';
         srcSw.style.opacity = '0.4';
-        lastSignalTime = -Infinity;  // start idle clock fresh
       } catch (e) {
         alert('Audio capture failed.\n' + e.message);
       }
